@@ -2,18 +2,19 @@
 // Compatible with OpenZeppelin Contracts for Cairo ^1.0.0
 
 #[starknet::contract]
-mod MyToken {
+mod Memecoin {
     use starknet::storage::StoragePointerReadAccess;
-use starknet::storage::StoragePointerWriteAccess;
-use openzeppelin::access::ownable::OwnableComponent;
+    use starknet::storage::StoragePointerWriteAccess;
+    use openzeppelin::access::ownable::OwnableComponent;
     use openzeppelin::governance::votes::VotesComponent;
     use openzeppelin::token::erc20::{ERC20Component, DefaultConfig};
     use openzeppelin::utils::cryptography::nonces::NoncesComponent;
     use openzeppelin::utils::cryptography::snip12::SNIP12Metadata;
-    use starknet::{ContractAddress, ClassHash, get_caller_address, event};
+    use starknet::{ContractAddress, get_caller_address, event};
     use core::num::traits::{Zero};
-    use core::zeroable;
+    // use core::zeroable;
     use core::traits::Into;
+    use relaunch::interfaces::Imemecoin::IMeme;
 
     component!(path: ERC20Component, storage: erc20, event: ERC20Event);
     component!(path: NoncesComponent, storage: nonces, event: NoncesEvent);
@@ -34,27 +35,6 @@ use openzeppelin::access::ownable::OwnableComponent;
     impl ERC20InternalImpl = ERC20Component::InternalImpl<ContractState>;
     impl VotesInternalImpl = VotesComponent::InternalImpl<ContractState>;
     impl OwnableInternalImpl = OwnableComponent::InternalImpl<ContractState>;
-
-    // Define the interface for the token
-    #[starknet::interface]
-    trait IMemeToken<TState> {
-        fn initialize(
-            ref self: TState,
-            name: ByteArray,
-            symbol: ByteArray,
-            token_uri: ByteArray
-        );
-        fn set_token_id(ref self: TState, token_id: u256);
-        fn mint(ref self: TState, to: ContractAddress, amount: u256);
-        fn burn(ref self: TState, amount: u256);
-        fn burn_from(ref self: TState, account: ContractAddress, amount: u256);
-        fn set_metadata(ref self: TState, name: felt252, symbol: felt252);
-        fn token_uri(self: @TState) -> felt252;
-        fn relaunch(self: @TState) -> ContractAddress;
-        fn token_id(self: @TState) -> u256;
-        fn creator(self: @TState) -> ContractAddress;
-        fn treasury(self: @TState) -> ContractAddress;
-    }
 
     #[storage]
     struct Storage {
@@ -127,7 +107,7 @@ use openzeppelin::access::ownable::OwnableComponent;
     }
 
     #[abi(embed_v0)]
-    impl MemeTokenImpl of IMemeToken<ContractState> {
+    impl MemeImpl of IMeme<ContractState> {
         // Initializes the token - can only be called once
         fn initialize(
             ref self: ContractState, 
@@ -203,31 +183,31 @@ use openzeppelin::access::ownable::OwnableComponent;
         }
 
         // Update token metadata - only callable by relaunch contract
-        fn set_metadata(ref self: ContractState, name: felt252, symbol: felt252) {
+        fn set_metadata(ref self: ContractState, name: ByteArray, symbol: ByteArray) {
             // Check that caller is relaunch contract
             self.assert_only_relaunch();
             
             // Update name and symbol
-            self.erc20.name.write(name);
-            self.erc20.symbol.write(symbol);
+            self.erc20.ERC20_name.write(name);
+            self.erc20.ERC20_symbol.write(symbol);
             
             // Emit event
-            self.emit(MetadataUpdated { name, symbol });
+            // self.emit(MetadataUpdated { name, symbol });
         }
 
         // Get the token URI
-        fn token_uri(self: @ContractState) -> felt252 {
-            self.token_uri
+        fn token_uri(self: @ContractState) -> ByteArray {
+            self.token_uri.read()
         }
 
         // Get the relaunch contract address
         fn relaunch(self: @ContractState) -> ContractAddress {
-            self.relaunch_contract
+            self.relaunch_contract.read()
         }
 
         // Get token ID
         fn token_id(self: @ContractState) -> u256 {
-            self.token_id
+            self.token_id.read()
         }
 
         // Get creator - this would need to query the relaunch contract
@@ -236,7 +216,7 @@ use openzeppelin::access::ownable::OwnableComponent;
             // In Solidity, this calls relaunch.ownerOf(tokenId)
             // For now, return the relaunch contract address
             // This would need to be updated once you have a relaunch contract
-            self.relaunch_contract
+            self.relaunch_contract.read()
         }
 
         // Get treasury - this would need to query the relaunch contract
@@ -245,7 +225,7 @@ use openzeppelin::access::ownable::OwnableComponent;
             // In Solidity, this calls relaunch.memecoinTreasury(tokenId)
             // For now, return zero address
             // This would need to be updated once you have a relaunch contract
-            starknet::contract_address_const::<0>()
+            get_caller_address() //todo: change this to the treasury address
         }
     }
 
