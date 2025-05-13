@@ -1,19 +1,17 @@
-// use relaunch::interfaces::Imemecoin::{IMeme, IMemeDispatcher, IMemeDispatcherTrait};
-// use relaunch::interfaces::Irelaunch::IRelaunch;
-
 // SPDX-License-Identifier: MIT
 // Compatible with OpenZeppelin Contracts for Cairo ^1.0.0
 
 #[starknet::contract]
 mod Relaunch {
-    use starknet::{ContractAddress, ClassHash, get_caller_address};
+    use starknet::storage::StoragePathEntry;
+use starknet::{ContractAddress, ClassHash, get_caller_address};
     use starknet::storage::StoragePointerReadAccess;
     use starknet::storage::StoragePointerWriteAccess;
     use starknet::storage::Map;
     use starknet::syscalls::deploy_syscall;
     use core::traits::Into;
     use core::traits::TryInto;
-    use core::array::SpanTrait;
+    // use core::array::SpanTrait;
     use core::array::ArrayTrait;
     use core::poseidon::poseidon_hash_span;
     use openzeppelin::access::accesscontrol::AccessControlComponent;
@@ -21,11 +19,12 @@ mod Relaunch {
     use openzeppelin::introspection::src5::SRC5Component;
     use openzeppelin::token::erc721::ERC721Component;
     use openzeppelin::token::erc721::extensions::ERC721EnumerableComponent;
-    use relaunch::interfaces::Imemecoin::{IMeme, IMemeDispatcher, IMemeDispatcherTrait};
+    use relaunch::interfaces::Imemecoin::{IMemeDispatcher, IMemeDispatcherTrait};
     use relaunch::interfaces::Irelaunch::IRelaunch;
 
     // Constants
     const DEPLOYER_ROLE: felt252 = 'DEPLOYER_ROLE';
+    const POSITION_MANAGER_ROLE: felt252 = 'POSITION_MANAGER_ROLE';
 
     // Component declarations
     component!(path: ERC721Component, storage: erc721, event: ERC721Event);
@@ -42,7 +41,9 @@ mod Relaunch {
     #[abi(embed_v0)]
     impl OwnableMixinImpl = OwnableComponent::OwnableMixinImpl<ContractState>;
     #[abi(embed_v0)]
-    impl AccessControlMixinImpl = AccessControlComponent::AccessControlMixinImpl<ContractState>;
+    impl AccessControlImpl = AccessControlComponent::AccessControlImpl<ContractState>;
+    #[abi(embed_v0)]
+    impl AccessControlCamelImpl = AccessControlComponent::AccessControlCamelImpl<ContractState>;
 
     // Internal implementations
     impl ERC721InternalImpl = ERC721Component::InternalImpl<ContractState>;
@@ -64,12 +65,12 @@ mod Relaunch {
         access_control: AccessControlComponent::Storage,
 
         // Custom storage
-        meme_factory: ClassHash,                               // Class hash for memecoin deployment
-        memecoin_contracts: Map<u256, ContractAddress>,  // token_id -> memecoin address
-        memecoin_treasury: Map<u256, ContractAddress>,   // token_id -> treasury address
-        last_token_id: u256,                                   // Counter for token IDs
-        memecoin_to_token_id: Map<ContractAddress, u256>, // memecoin address -> token_id
-        base_uri: ByteArray,                                   // Base URI for token metadata
+        meme_factory: ClassHash,                            // Class hash for memecoin deployment
+        memecoin_contracts: Map<u256, ContractAddress>,     // token_id -> memecoin address
+        memecoin_treasury: Map<u256, ContractAddress>,      // token_id -> treasury address
+        last_token_id: u256,                                // Counter for token IDs
+        memecoin_to_token_id: Map<ContractAddress, u256>,   // memecoin address -> token_id
+        position_manager: ContractAddress,                  // Position manager contract address
     }
 
     #[event]
@@ -88,7 +89,7 @@ mod Relaunch {
         MemecoinCreated: MemecoinCreated,
         TreasuryUpdated: TreasuryUpdated,
         MemeFactoryUpdated: MemeFactoryUpdated,
-        BaseURIUpdated: BaseURIUpdated,
+        PositionManagerUpdated: PositionManagerUpdated,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -119,8 +120,9 @@ mod Relaunch {
     }
 
     #[derive(Drop, starknet::Event)]
-    struct BaseURIUpdated {
-        base_uri: ByteArray,
+    struct PositionManagerUpdated {
+        #[key]
+        position_manager: ContractAddress,
     }
 
     #[constructor]
@@ -140,36 +142,29 @@ mod Relaunch {
         
         // Grant admin the deployer role
         self.access_control._grant_role(DEPLOYER_ROLE, admin);
+        self.access_control._grant_role(POSITION_MANAGER_ROLE, admin);
         
         // Set up custom storage
         self.meme_factory.write(meme_factory);
         self.last_token_id.write(0);
-    }
-
-    #[generate_trait]
-    impl InternalImpl of InternalTrait {
-        fn _assert_only_deployer(self: @ContractState) {
-            let caller = get_caller_address();
-            assert(
-                self.access_control.has_role(DEPLOYER_ROLE, caller),
-                'Caller is not a deployer'
-            );
-        }
+        
+        // todo: Initialize position manager to zero address until set
+        self.position_manager.write(get_caller_address());
     }
 
     #[abi(embed_v0)]
     impl RelaunchImpl of IRelaunch<ContractState> {
         // View functions
         fn memecoin_contract(self: @ContractState, token_id: u256) -> ContractAddress {
-            self.memecoin_contracts.read(token_id)
+            self.memecoin_contracts.entry(token_id).read()
         }
-
+        
         fn memecoin_treasury(self: @ContractState, token_id: u256) -> ContractAddress {
-            self.memecoin_treasury.read(token_id)
+            self.memecoin_treasury.entry(token_id).read()
         }
-
+        
         fn memecoin_to_token_id(self: @ContractState, memecoin: ContractAddress) -> u256 {
-            self.memecoin_to_token_id.read(memecoin)
+            self.memecoin_to_token_id.entry(memecoin).read()
         }
 
         fn last_token_id(self: @ContractState) -> u256 {
@@ -179,21 +174,17 @@ mod Relaunch {
         fn meme_factory(self: @ContractState) -> ClassHash {
             self.meme_factory.read()
         }
-
-        fn token_uri(self: @ContractState, token_id: u256) -> ByteArray {
-            // Ensure token exists
-            assert(self.erc721.exists(token_id), 'ERC721: invalid token ID');
-            
-            // Get memecoin address
-            let memecoin_address = self.memecoin_contracts.read(token_id);
-            
-            // Get token_uri from memecoin contract
-            let memecoin = IMemeDispatcher { contract_address: memecoin_address };
-            memecoin.token_uri()
+        
+        fn position_manager(self: @ContractState) -> ContractAddress {
+            self.position_manager.read()
+        }
+        
+        fn memecoin_token_uri(self: @ContractState, token_id: u256) -> ByteArray {
+            self._get_memecoin_token_uri(token_id)
         }
 
         // Core functionality
-        fn create_memecoin(
+        fn relaunch(
             ref self: ContractState,
             name: ByteArray,
             symbol: ByteArray,
@@ -233,22 +224,82 @@ mod Relaunch {
             memecoin.mint(caller, initial_supply);
             
             // Store state
-            self.memecoin_contracts.write(token_id, memecoin_address);
-            self.memecoin_treasury.write(token_id, treasury);
-            self.memecoin_to_token_id.write(memecoin_address, token_id);
+            self.memecoin_contracts.entry(token_id).write(memecoin_address);
+            self.memecoin_treasury.entry(token_id).write(treasury);
+            self.memecoin_to_token_id.entry(memecoin_address).write(token_id);
             
             // Mint NFT to creator
             self.erc721.mint(caller, token_id);
             
             // Emit event
-            self.emit(MemecoinCreated {
-                creator: caller,
-                token_id,
-                memecoin: memecoin_address,
-                name,
-                symbol,
-                token_uri,
-            });
+            // self.emit(MemecoinCreated {
+            //     creator: caller,
+            //     token_id,
+            //     memecoin: memecoin_address,
+            //     name,
+            //     symbol,
+            //     token_uri,
+            // });
+            
+            (memecoin_address, token_id)
+        }
+        
+        // Position Manager functions (to be used with future position manager)
+        fn create_memecoin_from_position_manager(
+            ref self: ContractState,
+            creator: ContractAddress,
+            name: ByteArray,
+            symbol: ByteArray,
+            token_uri: ByteArray,
+            initial_supply: u256,
+            treasury: ContractAddress
+        ) -> (ContractAddress, u256) {
+            // Ensure caller is position manager
+            self._assert_only_position_manager();
+            
+            // Increment token ID
+            let token_id = self.last_token_id.read() + 1;
+            self.last_token_id.write(token_id);
+            
+            // Create unique salt from creator and token_id
+            let mut salt_array = ArrayTrait::new();
+            salt_array.append(creator.into());
+            salt_array.append(token_id.try_into().unwrap());
+            let salt = poseidon_hash_span(salt_array.span());
+            
+            // Deploy memecoin contract
+            let (memecoin_address, _) = deploy_syscall(
+                self.meme_factory.read(),
+                salt,
+                ArrayTrait::new().span(),  // Empty constructor args
+                false
+            ).unwrap();
+            
+            // Initialize the memecoin
+            let mut memecoin = IMemeDispatcher { contract_address: memecoin_address };
+            memecoin.initialize(name, symbol, token_uri);
+            memecoin.set_token_id(token_id);
+            
+            // Mint initial supply to creator
+            memecoin.mint(creator, initial_supply);
+            
+            // Store state
+            self.memecoin_contracts.entry(token_id).write(memecoin_address);
+            self.memecoin_treasury.entry(token_id).write(treasury);
+            self.memecoin_to_token_id.entry(memecoin_address).write(token_id);
+            
+            // Mint NFT to creator
+            self.erc721.mint(creator, token_id);
+            
+            // Emit event
+            // self.emit(MemecoinCreated {
+            //     creator,
+            //     token_id,
+            //     memecoin: memecoin_address,
+            //     name,
+            //     symbol,
+            //     token_uri,
+            // });
             
             (memecoin_address, token_id)
         }
@@ -263,6 +314,19 @@ mod Relaunch {
             // Emit event
             self.emit(MemeFactoryUpdated { meme_factory });
         }
+        
+        fn set_position_manager(ref self: ContractState, position_manager: ContractAddress) {
+            // Only owner can set position manager
+            self.ownable.assert_only_owner();
+            
+            self.position_manager.write(position_manager);
+            
+            // Grant position manager role to the contract
+            self.access_control._grant_role(POSITION_MANAGER_ROLE, position_manager);
+            
+            // Emit event
+            self.emit(PositionManagerUpdated { position_manager });
+        }
 
         fn set_memecoin_treasury(ref self: ContractState, token_id: u256, treasury: ContractAddress) {
             let caller = get_caller_address();
@@ -273,7 +337,7 @@ mod Relaunch {
                 'Caller is not token owner'
             );
             
-            self.memecoin_treasury.write(token_id, treasury);
+            self.memecoin_treasury.entry(token_id).write(treasury);
             
             // Emit event
             self.emit(TreasuryUpdated { token_id, treasury });
@@ -284,10 +348,7 @@ mod Relaunch {
             self.ownable.assert_only_owner();
             
             // Update base URI in ERC721
-            self.erc721.set_base_uri(base_uri);
-            
-            // Emit event
-            self.emit(BaseURIUpdated { base_uri });
+            self.erc721._set_base_uri(base_uri);
         }
 
         // Role management
@@ -308,6 +369,24 @@ mod Relaunch {
         fn has_deployer_role(self: @ContractState, account: ContractAddress) -> bool {
             self.access_control.has_role(DEPLOYER_ROLE, account)
         }
+        
+        fn grant_position_manager_role(ref self: ContractState, account: ContractAddress) {
+            // Only admin can grant roles
+            self.ownable.assert_only_owner();
+            
+            self.access_control._grant_role(POSITION_MANAGER_ROLE, account);
+        }
+
+        fn revoke_position_manager_role(ref self: ContractState, account: ContractAddress) {
+            // Only admin can revoke roles
+            self.ownable.assert_only_owner();
+            
+            self.access_control._revoke_role(POSITION_MANAGER_ROLE, account);
+        }
+
+        fn has_position_manager_role(self: @ContractState, account: ContractAddress) -> bool {
+            self.access_control.has_role(POSITION_MANAGER_ROLE, account)
+        }
     }
 
     // ERC721 hooks implementation following OZ pattern
@@ -320,6 +399,40 @@ mod Relaunch {
         ) {
             let mut contract_state = self.get_contract_mut();
             contract_state.erc721_enumerable.before_update(to, token_id);
+        }
+    }
+
+    #[generate_trait]
+    impl InternalImpl of InternalTrait {
+        fn _assert_only_deployer(self: @ContractState) {
+            let caller = get_caller_address();
+            assert(
+                self.access_control.has_role(DEPLOYER_ROLE, caller),
+                'Caller is not a deployer'
+            );
+        }
+        
+        fn _assert_only_position_manager(self: @ContractState) {
+            let caller = get_caller_address();
+            let position_manager = self.position_manager.read();
+            
+            // Check if caller is position manager or has position manager role
+            assert(
+                caller == position_manager || self.access_control.has_role(POSITION_MANAGER_ROLE, caller),
+                'Caller is not position manager'
+            );
+        }
+        
+        fn _get_memecoin_token_uri(self: @ContractState, token_id: u256) -> ByteArray {
+            // Ensure token exists
+            assert(self.erc721.exists(token_id), 'ERC721: invalid token ID');
+            
+            // Get memecoin address
+            let memecoin_address = self.memecoin_contracts.entry(token_id).read();
+            
+            // Get token_uri from memecoin contract
+            let memecoin = IMemeDispatcher { contract_address: memecoin_address };
+            memecoin.token_uri()
         }
     }
 }
