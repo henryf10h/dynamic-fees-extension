@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2024_07"
 
 [dependencies]
-starknet = ">=2.11.4"
+starknet = ">=2.6.3"
 openzeppelin = { git = "https://github.com/OpenZeppelin/cairo-contracts", tag = "v2.0.0-alpha.1" }
-ekubo = { git = "https://github.com/ekubofinance/ekubo-core", branch = "main" }
-vesu = { git = "https://github.com/vesu-finance/vesu-core", rev = "d4e8f3a" }
+ekubo = { git = "https://github.com/ekuboprotocol/abis" }

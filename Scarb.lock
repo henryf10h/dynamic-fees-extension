@@ -2,6 +2,11 @@
 version = 1
 
 [[package]]
+name = "ekubo"
+version = "0.1.0"
+source = "git+https://github.com/ekuboprotocol/abis#f4a16b95967c5596d5a3cd4e0422bb9a2e3eb017"
+
+[[package]]
 name = "openzeppelin"
 version = "2.0.0-alpha.1"
 source = "git+https://github.com/OpenZeppelin/cairo-contracts?tag=v2.0.0-alpha.1#1f792f52e7842eed345373ee8554af32d2aa9056"
@@ -111,5 +116,6 @@ source = "git+https://github.com/OpenZeppelin/cairo-contracts?tag=v2.0.0-alpha.1
 name = "relaunch"
 version = "0.1.0"
 dependencies = [
+ "ekubo",
  "openzeppelin",
 ]
