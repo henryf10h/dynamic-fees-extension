@@ -2,11 +2,10 @@
 #[starknet::contract]
 pub mod PositionManager {
     use core::array::{ArrayTrait};
-    // use core::num::traits::{Zero};
     use core::serde::Serde;
     use ekubo::components::clear::{ClearImpl};
     use ekubo::components::owned::{Owned as owned_component};
-    use ekubo::components::shared_locker::{ consume_callback_data};
+    use ekubo::components::shared_locker::{consume_callback_data};
     use ekubo::components::upgradeable::{Upgradeable as upgradeable_component, IHasInterface};
     use ekubo::interfaces::core::{
         IExtension, SwapParameters, UpdatePositionParameters, IForwardee, ICoreDispatcher,
@@ -17,14 +16,14 @@ pub mod PositionManager {
     use ekubo::types::delta::{Delta};
     use ekubo::types::i129::{i129};
     use ekubo::types::keys::{PoolKey};
-    use starknet::{ ContractAddress};
+    use starknet::{ContractAddress};
     use starknet::storage::{
         StoragePointerReadAccess
     };
 
     // Import our ISP component
     use relaunch::contracts::internal_swap_pool::{isp_component};
-    use relaunch::contracts::internal_swap_pool::{ClaimableFees, ISPSwapData, ISPSwapResult};
+    use relaunch::contracts::internal_swap_pool::{ClaimableFees, ISPSwapData};
 
     #[abi(embed_v0)]
     impl Clear = ekubo::components::clear::ClearImpl<ContractState>;
@@ -40,7 +39,6 @@ pub mod PositionManager {
 
     // ISP Component
     component!(path: isp_component, storage: isp, event: ISPEvent);
-    // Don't embed ISP directly to avoid duplicate entry points
     impl ISPImpl = isp_component::ISPImpl<ContractState>;
     impl ISPInternal = isp_component::InternalImpl<ContractState>;
 
@@ -64,15 +62,15 @@ pub mod PositionManager {
         self.initialize_owned(owner);
         
         // Initialize ISP component with 0.3% fee
-        ISPImpl::initialize(ref self, native_token, core, 100);
+        ISPImpl::initialize(ref self, native_token, core, 30);
         
-        // Set call points - we only need before_swap and after_swap for ISP
+        // Set call points - minimal requirements for ISP
         core.set_call_points(
             CallPoints {
                 before_initialize_pool: false,
                 after_initialize_pool: false,
-                before_swap: false,        // No need to modify before swap
-                after_swap: true,          // Used for tracking/events only
+                before_swap: false,
+                after_swap: false,
                 before_update_position: false,
                 after_update_position: false,
                 before_collect_fees: false,
@@ -82,7 +80,7 @@ pub mod PositionManager {
     }
 
     #[derive(Drop, starknet::Event)]
-    pub struct SwapExecuted {
+    pub struct SwapProcessed {
         #[key]
         pub pool_key: PoolKey,
         #[key]
@@ -90,12 +88,13 @@ pub mod PositionManager {
         pub prefill_amount: u128,
         pub swap_amount: u128,
         pub fee_collected: u128,
+        pub total_output: u128,
     }
 
     #[derive(starknet::Event, Drop)]
     #[event]
     enum Event {
-        SwapExecuted: SwapExecuted,
+        SwapProcessed: SwapProcessed,
         #[flat]
         UpgradeableEvent: upgradeable_component::Event,
         #[flat]
@@ -108,93 +107,25 @@ pub mod PositionManager {
     #[abi(embed_v0)]
     impl PositionManagerHasInterface of IHasInterface<ContractState> {
         fn get_primary_interface_id(self: @ContractState) -> felt252 {
-            return selector!("relaunch::contracts::position_manager::PositionManager");
+            selector!("relaunch::contracts::position_manager::PositionManager")
         }
     }
 
-    // Simple extension implementation - just for tracking, no delta modification
+    // Minimal extension implementation - only required to be a valid extension
     #[abi(embed_v0)]
     impl ExtensionImpl of IExtension<ContractState> {
-        fn before_initialize_pool(
-            ref self: ContractState, 
-            caller: ContractAddress, 
-            pool_key: PoolKey, 
-            initial_tick: i129
-        ) {
-            // Nothing needed for ISP
-        }
-
-        fn after_initialize_pool(
-            ref self: ContractState, 
-            caller: ContractAddress, 
-            pool_key: PoolKey, 
-            initial_tick: i129
-        ) {
-            // Nothing needed for ISP
-        }
-
-        fn before_swap(
-            ref self: ContractState,
-            caller: ContractAddress,
-            pool_key: PoolKey,
-            params: SwapParameters
-        ) {
-            // Nothing needed - ISP logic happens in forwarded()
-        }
-
-        fn after_swap(
-            ref self: ContractState,
-            caller: ContractAddress,
-            pool_key: PoolKey,
-            params: SwapParameters,
-            delta: Delta
-        ) {
-            // Just for tracking/events - no delta modification allowed
-            // All fee collection happens in the lock-forward pattern
-        }
-
-        fn before_update_position(
-            ref self: ContractState,
-            caller: ContractAddress,
-            pool_key: PoolKey,
-            params: UpdatePositionParameters
-        ) {
-            // Allow all position updates
-        }
-
-        fn after_update_position(
-            ref self: ContractState,
-            caller: ContractAddress,
-            pool_key: PoolKey,
-            params: UpdatePositionParameters,
-            delta: Delta
-        ) {
-            // Nothing needed for ISP
-        }
-
-        fn before_collect_fees(
-            ref self: ContractState,
-            caller: ContractAddress,
-            pool_key: PoolKey,
-            salt: felt252,
-            bounds: Bounds
-        ) {
-            // Allow fee collection
-        }
-
-        fn after_collect_fees(
-            ref self: ContractState,
-            caller: ContractAddress,
-            pool_key: PoolKey,
-            salt: felt252,
-            bounds: Bounds,
-            delta: Delta
-        ) {
-            // Nothing needed for ISP
-        }
+        // All hooks return immediately - ISP logic happens in forwarded()
+        fn before_initialize_pool(ref self: ContractState, caller: ContractAddress, pool_key: PoolKey, initial_tick: i129) {}
+        fn after_initialize_pool(ref self: ContractState, caller: ContractAddress, pool_key: PoolKey, initial_tick: i129) {}
+        fn before_swap(ref self: ContractState, caller: ContractAddress, pool_key: PoolKey, params: SwapParameters) {}
+        fn after_swap(ref self: ContractState, caller: ContractAddress, pool_key: PoolKey, params: SwapParameters, delta: Delta) {}
+        fn before_update_position(ref self: ContractState, caller: ContractAddress, pool_key: PoolKey, params: UpdatePositionParameters) {}
+        fn after_update_position(ref self: ContractState, caller: ContractAddress, pool_key: PoolKey, params: UpdatePositionParameters, delta: Delta) {}
+        fn before_collect_fees(ref self: ContractState, caller: ContractAddress, pool_key: PoolKey, salt: felt252, bounds: Bounds) {}
+        fn after_collect_fees(ref self: ContractState, caller: ContractAddress, pool_key: PoolKey, salt: felt252, bounds: Bounds, delta: Delta) {}
     }
 
-    // This is the core ISP logic - follows the limit orders pattern closely
+    // Core ISP logic - handles forwarded calls from router
     #[abi(embed_v0)]
     impl ForwardeeImpl of IForwardee<ContractState> {
         fn forwarded(
@@ -205,10 +136,10 @@ pub mod PositionManager {
         ) -> Span<felt252> {
             let core = self.isp.core.read();
             
-            // Consume the callback data - this follows the limit orders pattern
+            // Consume the callback data from router
             let swap_data = consume_callback_data::<ISPSwapData>(core, data);
             
-            // Execute the ISP swap with prefill logic
+            // Execute the ISP swap with prefill logic and output fee collection
             let result = ISPImpl::execute_isp_swap(
                 ref self,
                 swap_data.pool_key,
@@ -216,33 +147,44 @@ pub mod PositionManager {
                 swap_data.user,
                 swap_data.max_fee_amount
             );
+            
+            // Calculate total output for event
+            let total_output = if swap_data.params.is_token1 {
+                result.total_delta.amount1.mag
+            } else {
+                result.total_delta.amount0.mag
+            };
 
             // Emit event for tracking
-            self.emit(SwapExecuted {
+            self.emit(SwapProcessed {
                 pool_key: swap_data.pool_key,
                 user: swap_data.user,
                 prefill_amount: result.prefill_amount,
                 swap_amount: result.swap_amount,
                 fee_collected: result.fee_collected,
+                total_output,
             });
 
-            // Serialize and return the result - follows limit orders pattern
+            // Serialize and return the result
             let mut result_data = array![];
             Serde::serialize(@result, ref result_data);
             result_data.span()
         }
     }
 
-    // Simple locker implementation - mainly for callback handling
+    // Locker implementation - not used in normal flow
     #[abi(embed_v0)]
     impl LockerImpl of ILocker<ContractState> {
         fn locked(ref self: ContractState, id: u32, data: Span<felt252>) -> Span<felt252> {
-            // Most ISP operations go through forwarded(), this is for any internal operations
-            array![].span()
+            // The router is the locker in our architecture
+            // ISP logic happens through forwarded() via the lock-forward pattern
+            let mut empty = array![];
+            assert(false, 'Not a locker - use Router');
+            empty.span()
         }
     }
 
-    /// Simplified interface for ISP Position Manager
+    /// Public interface for ISP functionality
     #[starknet::interface]
     pub trait IPositionManagerISP<TContractState> {
         fn get_pool_fees(self: @TContractState, pool_key: PoolKey) -> ClaimableFees;
@@ -253,22 +195,7 @@ pub mod PositionManager {
             params: SwapParameters
         ) -> bool;
         
-        fn accumulate_fees(
-            ref self: TContractState,
-            pool_key: PoolKey,
-            token: ContractAddress,
-            amount: u128
-        );
-        
         fn get_native_token(self: @TContractState) -> ContractAddress;
-        
-        fn execute_isp_swap(
-            ref self: TContractState,
-            pool_key: PoolKey,
-            params: SwapParameters,
-            user: ContractAddress,
-            max_fee_amount: u128
-        ) -> ISPSwapResult;
     }
 
     // Public interface for ISP functionality
@@ -288,33 +215,9 @@ pub mod PositionManager {
             ISPImpl::can_use_prefill(self, pool_key, params)
         }
 
-        /// Accumulate fees from router
-        fn accumulate_fees(
-            ref self: ContractState,
-            pool_key: PoolKey,
-            token: ContractAddress,
-            amount: u128
-        ) {
-            // Only allow the router or owner to accumulate fees
-            // In practice, this would be called by the router after collecting fees
-            ISPImpl::accumulate_fees(ref self, pool_key, token, amount);
-        }
-
         /// Get native token address
         fn get_native_token(self: @ContractState) -> ContractAddress {
             self.isp.native_token.read()
         }
-
-        /// Direct ISP swap execution (mainly for testing)
-        fn execute_isp_swap(
-            ref self: ContractState,
-            pool_key: PoolKey,
-            params: SwapParameters,
-            user: ContractAddress,
-            max_fee_amount: u128
-        ) -> ISPSwapResult {
-            ISPImpl::execute_isp_swap(ref self, pool_key, params, user, max_fee_amount)
-        }
     }
 }
-

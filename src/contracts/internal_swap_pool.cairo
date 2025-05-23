@@ -19,15 +19,15 @@ pub struct ISPSwapData {
     pub pool_key: PoolKey,
     pub params: SwapParameters,
     pub user: ContractAddress,
-    pub max_fee_amount: u128, // Max fee user is willing to pay
+    pub max_fee_amount: u128, // Not used for exact input
 }
 
 /// Result of ISP swap operation
 #[derive(Copy, Drop, Serde)]
 pub struct ISPSwapResult {
-    pub total_delta: Delta,           // Combined result for user
+    pub total_delta: Delta,           // Final delta for user (after fees)
     pub prefill_amount: u128,         // Amount prefilled from fees
-    pub fee_collected: u128,          // Fee collected from user
+    pub fee_collected: u128,          // Fee collected from output
     pub swap_amount: u128,            // Amount swapped through core
 }
 
@@ -87,6 +87,7 @@ pub mod isp_component {
     pub enum Event {
         FeesAccumulated: FeesAccumulated,
         PrefillExecuted: PrefillExecuted,
+        OutputFeeCollected: OutputFeeCollected,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -104,7 +105,17 @@ pub mod isp_component {
         #[key]
         pub user: ContractAddress,
         pub prefill_amount: u128,
-        pub fee_collected: u128,
+        pub eth_received: u128,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    pub struct OutputFeeCollected {
+        #[key]
+        pub pool_key: PoolKey,
+        #[key]
+        pub user: ContractAddress,
+        pub output_token: ContractAddress,
+        pub fee_amount: u128,
     }
 
     #[embeddable_as(ISPImpl)]
@@ -137,7 +148,11 @@ pub mod isp_component {
             pool_key: PoolKey,
             params: SwapParameters
         ) -> bool {
-            // Only prefill for ETH → Token swaps
+            // Only prefill for ETH → Token swaps (exact input)
+            if params.amount.sign {
+                return false; // Not exact input
+            }
+            
             let native_is_token0 = self.native_token.read() == pool_key.token0;
             let is_eth_for_token = (native_is_token0 && !params.is_token1) || 
                                    (!native_is_token0 && params.is_token1);
@@ -148,10 +163,14 @@ pub mod isp_component {
 
             // Check if we have accumulated token fees to use
             let fees = self.pool_fees.read(pool_key);
-            fees.amount1 > 0
+            if native_is_token0 {
+                fees.amount1 > 0
+            } else {
+                fees.amount0 > 0
+            }
         }
 
-        /// Execute ISP swap with prefill logic - this is the core ISP function
+        /// Execute ISP swap with prefill logic and output fee collection
         fn execute_isp_swap(
             ref self: ComponentState<TContractState>,
             pool_key: PoolKey,
@@ -160,101 +179,201 @@ pub mod isp_component {
             max_fee_amount: u128
         ) -> ISPSwapResult {
             let core = self.core.read();
+            let native_token = self.native_token.read();
+            
+            // Determine token addresses
+            let (token0_is_native, output_token) = if native_token == pool_key.token0 {
+                (true, pool_key.token1)
+            } else {
+                (false, pool_key.token0)
+            };
             
             // Check if we can use prefill
-            if !self.can_use_prefill(pool_key, params) {
-                // No prefill possible - execute regular swap
-                let delta = core.swap(pool_key, params);
-                return ISPSwapResult {
-                    total_delta: delta,
-                    prefill_amount: 0,
-                    fee_collected: 0,
-                    swap_amount: if params.is_token1 { delta.amount1.mag } else { delta.amount0.mag },
-                };
-            }
-
-            // Calculate prefill amounts
-            let available_token_fees = self.pool_fees.read(pool_key).amount1;
-            let prefill_amount = InternalImpl::_calculate_prefill_amount(@self, params, available_token_fees);
+            let mut prefill_amount = 0_u128;
             
-            if prefill_amount == 0 {
-                // No prefill possible - execute regular swap
-                let delta = core.swap(pool_key, params);
-                return ISPSwapResult {
-                    total_delta: delta,
-                    prefill_amount: 0,
-                    fee_collected: 0,
-                    swap_amount: if params.is_token1 { delta.amount1.mag } else { delta.amount0.mag },
+            if self.can_use_prefill(pool_key, params) {
+                // Calculate prefill amounts
+                let available_token_fees = if token0_is_native {
+                    self.pool_fees.read(pool_key).amount1
+                } else {
+                    self.pool_fees.read(pool_key).amount0
                 };
+                
+                // For exact input ETH swaps, we can prefill up to the available token fees
+                // The prefill amount is in terms of output tokens we can provide
+                // TODO: Use actual price to calculate how much ETH this saves
+                prefill_amount = core::cmp::min(available_token_fees, params.amount.mag);
+                
+                if prefill_amount > 0 {
+                    // Execute prefill: load and prepare tokens from fees
+                    InternalImpl::_execute_prefill(
+                        ref self, 
+                        pool_key, 
+                        prefill_amount, 
+                        output_token
+                    );
+                    
+                    self.emit(PrefillExecuted {
+                        pool_key,
+                        user,
+                        prefill_amount,
+                        eth_received: prefill_amount, // Simplified: 1:1 for now
+                    });
+                }
             }
-
-            // Calculate fee to collect
-            let fee_amount = InternalImpl::_calculate_fee(@self, prefill_amount);
-            assert(fee_amount <= max_fee_amount, 'Fee exceeds maximum');
-
-            // Execute the prefill operation
-            let prefill_delta = InternalImpl::_execute_prefill(ref self, pool_key, prefill_amount, fee_amount, user);
             
-            // Calculate remaining swap if needed
-            let remaining_amount = if params.amount.mag > prefill_amount {
-                params.amount.mag - prefill_amount
+            // Calculate remaining swap amount in ETH terms
+            // If we prefilled X tokens worth Y ETH, reduce swap by Y
+            let eth_used_for_prefill = prefill_amount; // Simplified: 1:1 ratio
+            let remaining_eth = if params.amount.mag > eth_used_for_prefill {
+                params.amount.mag - eth_used_for_prefill
             } else {
                 0
             };
-
-            let (total_delta, swap_amount) = if remaining_amount > 0 {
+            
+            let mut swap_output = 0_u128;
+            let mut swap_delta = Delta { amount0: i129 { mag: 0, sign: false }, amount1: i129 { mag: 0, sign: false } };
+            
+            if remaining_eth > 0 {
                 // Execute remaining swap through core
                 let remaining_params = SwapParameters {
-                    amount: i129 { mag: remaining_amount, sign: params.amount.sign },
+                    amount: i129 { mag: remaining_eth, sign: false }, // Exact input
                     is_token1: params.is_token1,
                     sqrt_ratio_limit: params.sqrt_ratio_limit,
                     skip_ahead: params.skip_ahead,
                 };
                 
-                let swap_delta = core.swap(pool_key, remaining_params);
+                swap_delta = core.swap(pool_key, remaining_params);
                 
-                // Combine prefill and swap deltas
-                let combined_delta = InternalImpl::_combine_deltas(@self, prefill_delta, swap_delta);
-                (combined_delta, remaining_amount)
+                // Get swap output amount
+                swap_output = if params.is_token1 {
+                    swap_delta.amount1.mag
+                } else {
+                    swap_delta.amount0.mag
+                };
+            }
+            
+            // Total output before fees (prefill + swap)
+            let total_output_before_fee = prefill_amount + swap_output;
+            
+            // Calculate fee from total output
+            let fee_amount = (total_output_before_fee * self.fee_percentage.read()) / 10000;
+            let output_after_fee = total_output_before_fee - fee_amount;
+            
+            // Handle token distributions via core.withdraw
+            if total_output_before_fee > 0 {
+                // Withdraw output to user (after fee)
+                if output_after_fee > 0 {
+                    core.withdraw(output_token, user, output_after_fee);
+                }
+                
+                // Withdraw fee to ISP contract and save it
+                if fee_amount > 0 {
+                    core.withdraw(output_token, get_contract_address(), fee_amount);
+                    
+                    // Save the fee for future use
+                    let saved_balance_key = SavedBalanceKey {
+                        owner: get_contract_address(),
+                        token: output_token,
+                        salt: InternalImpl::_get_fee_salt(@self, pool_key, output_token),
+                    };
+                    core.save(saved_balance_key, fee_amount);
+                    
+                    // Update internal tracking
+                    InternalImpl::_update_fee_tracking(ref self, pool_key, output_token, fee_amount);
+                }
+            }
+            
+            if fee_amount > 0 {
+                self.emit(OutputFeeCollected {
+                    pool_key,
+                    user,
+                    output_token,
+                    fee_amount,
+                });
+            }
+            
+            // Create final delta representing user's perspective
+            let total_delta = if params.is_token1 {
+                Delta {
+                    amount0: swap_delta.amount0,
+                    amount1: i129 { mag: output_after_fee, sign: true }
+                }
             } else {
-                // Only prefill, no additional swap needed
-                (prefill_delta, 0)
+                Delta {
+                    amount0: i129 { mag: output_after_fee, sign: true },
+                    amount1: swap_delta.amount1
+                }
             };
-
-            self.emit(PrefillExecuted {
-                pool_key,
-                user,
-                prefill_amount,
-                fee_collected: fee_amount,
-            });
-
+            
             ISPSwapResult {
                 total_delta,
                 prefill_amount,
                 fee_collected: fee_amount,
-                swap_amount,
+                swap_amount: remaining_eth,
             }
         }
 
-        /// Accumulate fees from router (when users pay fees for swaps)
+        /// Accumulate fees from external sources
         fn accumulate_fees(
             ref self: ComponentState<TContractState>,
             pool_key: PoolKey,
             token: ContractAddress,
             amount: u128
         ) {
-            // Save the fees in core for later use
-            let saved_balance_key = SavedBalanceKey {
+            InternalImpl::_update_fee_tracking(ref self, pool_key, token, amount);
+        }
+    }
+
+    #[generate_trait]
+    pub impl InternalImpl<
+        TContractState, +HasComponent<TContractState>
+    > of InternalTrait<TContractState> {
+        /// Execute prefill operation - load tokens from saved fees
+        fn _execute_prefill(
+            ref self: ComponentState<TContractState>,
+            pool_key: PoolKey,
+            token_amount: u128,
+            token: ContractAddress
+        ) {
+            let core = self.core.read();
+            
+            // Load tokens from saved fees
+            let token_balance_key = SavedBalanceKey {
                 owner: get_contract_address(),
                 token,
-                salt: InternalImpl::_get_fee_salt(@self, pool_key, token),
+                salt: self._get_fee_salt(pool_key, token),
             };
             
-            self.core.read().save(saved_balance_key, amount);
-
+            // Load the tokens we'll give from fees
+            core.load(token, token_balance_key.salt, token_amount);
+            
+            // Update fee tracking
+            let mut current_fees = self.pool_fees.read(pool_key);
+            let native_token = self.native_token.read();
+            
+            if token == native_token {
+                // This shouldn't happen - we don't prefill with native token
+                assert(token != native_token, 'Cant prefill with native token');
+            } else {
+                // Reduce non-native token fees
+                current_fees.amount1 -= token_amount;
+            }
+            self.pool_fees.write(pool_key, current_fees);
+        }
+        
+        /// Update fee tracking after collecting fees
+        fn _update_fee_tracking(
+            ref self: ComponentState<TContractState>,
+            pool_key: PoolKey,
+            token: ContractAddress,
+            amount: u128
+        ) {
             // Update internal tracking
             let mut current_fees = self.pool_fees.read(pool_key);
-            if token == self.native_token.read() {
+            let native_token = self.native_token.read();
+            
+            if token == native_token {
                 current_fees.amount0 += amount;
             } else {
                 current_fees.amount1 += amount;
@@ -263,155 +382,7 @@ pub mod isp_component {
             
             self.emit(FeesAccumulated { pool_key, token, amount });
         }
-    }
-
-    #[generate_trait]
-    pub impl InternalImpl<
-        TContractState, +HasComponent<TContractState>
-    > of InternalTrait<TContractState> {
-        /// Calculate maximum prefill amount based on available fees and swap params
-        fn _calculate_prefill_amount(
-            self: @ComponentState<TContractState>,
-            params: SwapParameters,
-            available_fees: u128
-        ) -> u128 {
-            if available_fees == 0 {
-                return 0;
-            }
-
-            if params.amount.sign {
-                // Exact output - can prefill up to the full requested amount
-                core::cmp::min(available_fees, params.amount.mag)
-            } else {
-                // Exact input - calculate max tokens we can provide for the ETH input
-                // For simplicity, assume we can prefill up to available fees
-                // In production, this would use proper price calculations
-                core::cmp::min(available_fees, params.amount.mag)
-            }
-        }
-
-        /// Calculate fee for prefill operation
-        fn _calculate_fee(
-            self: @ComponentState<TContractState>,
-            prefill_amount: u128
-        ) -> u128 {
-            (prefill_amount * self.fee_percentage.read()) / 10000
-        }
-
-        /// Execute the actual prefill: take ETH from user, give tokens from fees
-        fn _execute_prefill(
-            ref self: ComponentState<TContractState>,
-            pool_key: PoolKey,
-            prefill_amount: u128,
-            fee_amount: u128,
-            user: ContractAddress
-        ) -> Delta {
-            let core = self.core.read();
-            let native_token = self.native_token.read();
-            
-            // Determine token addresses
-            let (eth_token, other_token) = if native_token == pool_key.token0 {
-                (pool_key.token0, pool_key.token1)
-            } else {
-                (pool_key.token1, pool_key.token0)
-            };
-
-            // Take ETH fee from user (core.pay() will be called from router)
-            // The router should have already called core.pay() for the ETH
-
-            // Load tokens from saved fees to give to user
-            let token_balance_key = SavedBalanceKey {
-                owner: get_contract_address(),
-                token: other_token,
-                salt: self._get_fee_salt(pool_key, other_token),
-            };
-
-            // Load the tokens we'll give to user
-            core.load(other_token, token_balance_key.salt, prefill_amount);
-            
-            // Withdraw tokens to user
-            core.withdraw(other_token, user, prefill_amount);
-
-            // Save the ETH fee we collected
-            let eth_balance_key = SavedBalanceKey {
-                owner: get_contract_address(),
-                token: eth_token,
-                salt: self._get_fee_salt(pool_key, eth_token),
-            };
-            
-            core.save(eth_balance_key, fee_amount);
-
-            // Update fee tracking
-            self._update_fees_after_prefill(pool_key, prefill_amount, fee_amount);
-
-            // Create delta representing the prefill operation
-            if native_token == pool_key.token0 {
-                Delta {
-                    amount0: i129 { mag: fee_amount, sign: false },      // ETH taken as fee
-                    amount1: i129 { mag: prefill_amount, sign: true }    // Tokens given to user
-                }
-            } else {
-                Delta {
-                    amount0: i129 { mag: prefill_amount, sign: true },   // Tokens given to user
-                    amount1: i129 { mag: fee_amount, sign: false }       // ETH taken as fee
-                }
-            }
-        }
-
-        /// Update fee balances after prefill
-        fn _update_fees_after_prefill(
-            ref self: ComponentState<TContractState>,
-            pool_key: PoolKey,
-            tokens_used: u128,
-            eth_collected: u128
-        ) {
-            let mut current_fees = self.pool_fees.read(pool_key);
-            
-            // Reduce token fees used for prefill
-            current_fees.amount1 = if current_fees.amount1 >= tokens_used {
-                current_fees.amount1 - tokens_used
-            } else {
-                0
-            };
-            
-            // Increase ETH fees collected
-            current_fees.amount0 += eth_collected;
-            
-            self.pool_fees.write(pool_key, current_fees);
-        }
-
-        /// Combine two deltas
-        fn _combine_deltas(
-            self: @ComponentState<TContractState>,
-            delta1: Delta,
-            delta2: Delta
-        ) -> Delta {
-            let amount0_combined = if delta1.amount0.sign == delta2.amount0.sign {
-                // Same sign, add magnitudes
-                i129 { mag: delta1.amount0.mag + delta2.amount0.mag, sign: delta1.amount0.sign }
-            } else if delta1.amount0.mag >= delta2.amount0.mag {
-                // Different signs, subtract magnitudes
-                i129 { mag: delta1.amount0.mag - delta2.amount0.mag, sign: delta1.amount0.sign }
-            } else {
-                i129 { mag: delta2.amount0.mag - delta1.amount0.mag, sign: delta2.amount0.sign }
-            };
-
-            let amount1_combined = if delta1.amount1.sign == delta2.amount1.sign {
-                // Same sign, add magnitudes
-                i129 { mag: delta1.amount1.mag + delta2.amount1.mag, sign: delta1.amount1.sign }
-            } else if delta1.amount1.mag >= delta2.amount1.mag {
-                // Different signs, subtract magnitudes
-                i129 { mag: delta1.amount1.mag - delta2.amount1.mag, sign: delta1.amount1.sign }
-            } else {
-                i129 { mag: delta2.amount1.mag - delta1.amount1.mag, sign: delta2.amount1.sign }
-            };
-
-            Delta {
-                amount0: amount0_combined,
-                amount1: amount1_combined,
-            }
-        }
-
+        
         /// Generate salt for saved balance key
         fn _get_fee_salt(
             self: @ComponentState<TContractState>,
@@ -419,7 +390,6 @@ pub mod isp_component {
             token: ContractAddress
         ) -> felt252 {
             // Simple salt generation based on pool and token
-            // In production, use proper hashing
             let token_felt: felt252 = token.into();
             let fee_felt: felt252 = pool_key.fee.into();
             token_felt + fee_felt

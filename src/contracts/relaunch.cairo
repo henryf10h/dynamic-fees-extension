@@ -132,7 +132,8 @@ mod Relaunch {
         symbol: ByteArray,
         base_uri: ByteArray,
         meme_factory: ClassHash,
-        admin: ContractAddress
+        admin: ContractAddress,
+        position_manager: ContractAddress,
     ) {
         // Initialize components
         self.erc721.initializer(name, symbol, base_uri);
@@ -148,8 +149,8 @@ mod Relaunch {
         self.meme_factory.write(meme_factory);
         self.last_token_id.write(0);
         
-        // todo: Initialize position manager to zero address until set
-        self.position_manager.write(get_caller_address());
+        // Initialize position manager to zero address until set
+        self.position_manager.write(position_manager);
     }
 
     #[abi(embed_v0)]

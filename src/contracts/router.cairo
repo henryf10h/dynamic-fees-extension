@@ -5,23 +5,23 @@ pub mod ISPRouter {
     use core::traits::Into;
     use ekubo::components::clear::{ClearImpl};
     use ekubo::components::owned::{Owned as owned_component};
+    use ekubo::components::shared_locker::{
+        call_core_with_callback, consume_callback_data, forward_lock
+    };
+    use ekubo::components::util::{serialize};
     use ekubo::interfaces::core::{
         ICoreDispatcher, ICoreDispatcherTrait, SwapParameters, IForwardeeDispatcher, ILocker
     };
     use ekubo::interfaces::erc20::{IERC20Dispatcher, IERC20DispatcherTrait};
-    use ekubo::types::delta::{Delta};
-    use ekubo::types::i129::{i129};
+
     use ekubo::types::keys::{PoolKey};
     use starknet::{get_contract_address, get_caller_address, ContractAddress};
-    use starknet::storage::{
-        StoragePointerWriteAccess, StorageMapWriteAccess, StorageMapReadAccess,
-        StoragePointerReadAccess, Map
-    };
+    use starknet::storage::{StoragePointerWriteAccess, StoragePointerReadAccess};
 
-    // Import ISP types from the correct module path
+    // Import ISP types
     use relaunch::contracts::internal_swap_pool::{ISPSwapData, ISPSwapResult, ClaimableFees};
     
-    // Define the position manager interface here since it's internal to the position_manager module
+    // Position manager interface
     #[starknet::interface]
     pub trait IPositionManagerISP<TContractState> {
         fn get_pool_fees(self: @TContractState, pool_key: PoolKey) -> ClaimableFees;
@@ -30,20 +30,7 @@ pub mod ISPRouter {
             pool_key: PoolKey,
             params: SwapParameters
         ) -> bool;
-        fn accumulate_fees(
-            ref self: TContractState,
-            pool_key: PoolKey,
-            token: ContractAddress,
-            amount: u128
-        );
         fn get_native_token(self: @TContractState) -> ContractAddress;
-        fn execute_isp_swap(
-            ref self: TContractState,
-            pool_key: PoolKey,
-            params: SwapParameters,
-            user: ContractAddress,
-            max_fee_amount: u128
-        ) -> ISPSwapResult;
     }
 
     #[abi(embed_v0)]
@@ -58,10 +45,6 @@ pub mod ISPRouter {
     struct Storage {
         core: ICoreDispatcher,
         native_token: ContractAddress,
-        // Track which extensions are ISP-enabled
-        isp_extensions: Map<ContractAddress, bool>,
-        // Fee percentage for non-ISP swaps (basis points)
-        fee_percentage: u128,
         #[substorage(v0)]
         owned: owned_component::Storage,
     }
@@ -72,49 +55,40 @@ pub mod ISPRouter {
         owner: ContractAddress,
         core: ICoreDispatcher,
         native_token: ContractAddress,
-        fee_percentage: u128,
     ) {
         self.initialize_owned(owner);
         self.core.write(core);
         self.native_token.write(native_token);
-        self.fee_percentage.write(fee_percentage); // e.g., 30 = 0.3%
     }
 
     #[derive(Drop, starknet::Event)]
-    pub struct SwapRouted {
+    pub struct SwapExecuted {
         #[key]
         pub pool_key: PoolKey,
         #[key]
         pub user: ContractAddress,
-        pub used_isp: bool,
-        pub prefill_amount: u128,
-        pub total_output: u128,
+        pub amount_in: u128,
+        pub amount_out: u128,
         pub fee_collected: u128,
-    }
-
-    #[derive(Drop, starknet::Event)]
-    pub struct ISPExtensionRegistered {
-        #[key]
-        pub extension: ContractAddress,
-        pub enabled: bool,
-    }
-
-    #[derive(Drop, starknet::Event)]
-    pub struct FeesAccumulated {
-        #[key]
-        pub pool_key: PoolKey,
-        pub token: ContractAddress,
-        pub amount: u128,
     }
 
     #[derive(starknet::Event, Drop)]
     #[event]
     enum Event {
-        SwapRouted: SwapRouted,
-        ISPExtensionRegistered: ISPExtensionRegistered,
-        FeesAccumulated: FeesAccumulated,
+        SwapExecuted: SwapExecuted,
         #[flat]
         OwnedEvent: owned_component::Event,
+    }
+
+    // Storage for callback data
+    #[derive(Copy, Drop, Serde)]
+    struct CallbackData {
+        caller: ContractAddress,
+        pool_key: PoolKey,
+        params: SwapParameters,
+        token_in: ContractAddress,
+        amount_in: u128,
+        amount_out_min: u128,
     }
 
     /// Interface for ISP Router
@@ -125,124 +99,67 @@ pub mod ISPRouter {
             pool_key: PoolKey,
             params: SwapParameters,
             token_in: ContractAddress,
-            amount_in_max: u128,
+            amount_in: u128,
             amount_out_min: u128,
             deadline: u64
-        ) -> Delta;
-
-        fn register_isp_extension(
-            ref self: TContractState, 
-            extension: ContractAddress, 
-            enabled: bool
-        );
+        ) -> ISPSwapResult;
 
         fn preview_isp_swap(
             self: @TContractState,
             pool_key: PoolKey,
             params: SwapParameters
         ) -> (bool, ClaimableFees, u128);
-
-        fn get_pool_fees(self: @TContractState, pool_key: PoolKey) -> ClaimableFees;
     }
 
     #[abi(embed_v0)]
     impl ISPRouterImpl of IISPRouter<ContractState> {
-        /// Main swap function - automatically uses ISP if available and beneficial
+        /// Main swap function - uses lock-forward pattern for ISP
         fn swap(
             ref self: ContractState,
             pool_key: PoolKey,
             params: SwapParameters,
             token_in: ContractAddress,
-            amount_in_max: u128,
+            amount_in: u128,
             amount_out_min: u128,
             deadline: u64
-        ) -> Delta {
+        ) -> ISPSwapResult {
             // Check deadline
             assert(starknet::get_block_timestamp() <= deadline, 'Deadline exceeded');
+            
+            // Verify this is an exact input swap
+            assert(!params.amount.sign, 'Only exact input swaps');
+            assert(params.amount.mag == amount_in, 'Amount mismatch');
 
-            let user = get_caller_address();
+            let caller = get_caller_address();
             
-            // Check if pool extension supports ISP
-            let supports_isp = self.isp_extensions.read(pool_key.extension);
-            
-            if supports_isp {
-                // Try ISP swap
-                let isp_result = self._execute_isp_swap(pool_key, params, user, amount_in_max);
-                
-                // Check if ISP was actually used (prefill occurred)
-                if isp_result.prefill_amount > 0 {
-                    self.emit(SwapRouted {
-                        pool_key,
-                        user,
-                        used_isp: true,
-                        prefill_amount: isp_result.prefill_amount,
-                        total_output: if params.is_token1 { 
-                            isp_result.total_delta.amount1.mag 
-                        } else { 
-                            isp_result.total_delta.amount0.mag 
-                        },
-                        fee_collected: isp_result.fee_collected,
-                    });
-                    
-                    return isp_result.total_delta;
-                }
-            }
-
-            // Fall back to regular swap with fee collection
-            let result = self._execute_regular_swap_with_fees(
-                pool_key, 
-                params, 
-                token_in, 
-                amount_in_max, 
-                amount_out_min, 
-                user
-            );
-            
-            self.emit(SwapRouted {
+            // Prepare callback data
+            let callback_data = CallbackData {
+                caller,
                 pool_key,
-                user,
-                used_isp: false,
-                prefill_amount: 0,
-                total_output: if params.is_token1 { 
-                    result.amount1.mag 
-                } else { 
-                    result.amount0.mag 
-                },
-                fee_collected: 0, // Fee collection handled separately for regular swaps
-            });
-
-            result
-        }
-
-        /// Register an extension as ISP-enabled
-        fn register_isp_extension(ref self: ContractState, extension: ContractAddress, enabled: bool) {
-            self.initialize_owned(get_caller_address());//todo: check the owner here!
-            self.isp_extensions.write(extension, enabled);
+                params,
+                token_in,
+                amount_in,
+                amount_out_min,
+            };
             
-            self.emit(ISPExtensionRegistered { extension, enabled });
+            // Use the helper to call core.lock with our callback
+            call_core_with_callback::<CallbackData, ISPSwapResult>(
+                self.core.read(),
+                @callback_data
+            )
         }
 
-        /// Check if pool supports ISP and preview potential prefill
+        /// Preview potential ISP prefill
         fn preview_isp_swap(
             self: @ContractState,
             pool_key: PoolKey,
             params: SwapParameters
         ) -> (bool, ClaimableFees, u128) {
-            let supports_isp = self.isp_extensions.read(pool_key.extension);
-            
-            if !supports_isp {
-                return (false, ClaimableFees { amount0: 0, amount1: 0 }, 0);
-            }
-
-            // Query the ISP extension for available fees
             let isp_manager = IPositionManagerISPDispatcher { contract_address: pool_key.extension };
             let available_fees = IPositionManagerISPDispatcherTrait::get_pool_fees(isp_manager, pool_key);
-            
-            // Check if this swap can use prefill
             let can_prefill = IPositionManagerISPDispatcherTrait::can_use_prefill(isp_manager, pool_key, params);
             
             let potential_prefill = if can_prefill {
-                // Simple estimation - in production, calculate more precisely
                 if params.amount.sign {
                     core::cmp::min(available_fees.amount1, params.amount.mag)
                 } else {
@@ -252,161 +169,70 @@ pub mod ISPRouter {
                 0
             };
 
-            (supports_isp, available_fees, potential_prefill)
-        }
-
-        /// Get accumulated fees for a pool
-        fn get_pool_fees(self: @ContractState, pool_key: PoolKey) -> ClaimableFees {
-            let supports_isp = self.isp_extensions.read(pool_key.extension);
-            
-            if supports_isp {
-                let isp_manager = IPositionManagerISPDispatcher { contract_address: pool_key.extension };
-                IPositionManagerISPDispatcherTrait::get_pool_fees(isp_manager, pool_key)
-            } else {
-                ClaimableFees { amount0: 0, amount1: 0 }
-            }
+            (can_prefill, available_fees, potential_prefill)
         }
     }
 
-    // Simple locker implementation for handling swaps
+    // Locker implementation - this is where the core logic happens
     #[abi(embed_v0)]
     impl LockerImpl of ILocker<ContractState> {
         fn locked(ref self: ContractState, id: u32, data: Span<felt252>) -> Span<felt252> {
-            // This would handle regular swaps if needed
-            // For now, most logic is in the main functions
-            array![].span()
-        }
-    }
-
-    #[generate_trait]
-    impl InternalImpl of InternalTrait {
-        /// Execute ISP swap using the lock-forward pattern
-        fn _execute_isp_swap(
-            ref self: ContractState,
-            pool_key: PoolKey,
-            params: SwapParameters,
-            user: ContractAddress,
-            max_amount_in: u128
-        ) -> ISPSwapResult {
             let core = self.core.read();
-            let native_token = self.native_token.read();
             
-            // For ETH → Token swaps, collect ETH from user first
-            let is_eth_for_token = self._is_eth_for_token_swap(pool_key, params, native_token);
+            // Consume the callback data
+            let callback_data = consume_callback_data::<CallbackData>(core, data);
             
-            if is_eth_for_token {
-                // Take ETH from user for potential fee payment
-                // The ISP will determine actual fee amount
-                let eth_token = IERC20Dispatcher { contract_address: native_token };
-                
-                // Transfer ETH to this router first
-                let amount_u256: u256 = max_amount_in.into();
-                eth_token.transferFrom(user, get_contract_address(), amount_u256);
-                
-                // Pay ETH to core for the ISP extension to use
-                eth_token.approve(core.contract_address, amount_u256);
-                core.pay(native_token);
-            }
-
-            // Prepare ISP data
+            // Transfer input tokens from caller to router
+            let token_in_contract = IERC20Dispatcher { contract_address: callback_data.token_in };
+            let amount_in_u256: u256 = callback_data.amount_in.into();
+            token_in_contract.transferFrom(
+                callback_data.caller, 
+                get_contract_address(), 
+                amount_in_u256
+            );
+            
+            // Approve and pay to core
+            token_in_contract.approve(core.contract_address, amount_in_u256);
+            core.pay(callback_data.token_in);
+            
+            // Prepare ISP swap data
             let isp_data = ISPSwapData {
-                pool_key,
-                params,
-                user,
-                max_fee_amount: max_amount_in, // Max fee user is willing to pay
-            };
-
-            // Forward to ISP extension using lock-forward pattern
-            let forwardee = IForwardeeDispatcher { contract_address: pool_key.extension };
-            
-            // Serialize the ISP data
-            let mut serialized_data = array![];
-            core::serde::Serde::serialize(@isp_data, ref serialized_data);
-            
-            // Forward the call and get result
-            let result_data = core.forward(forwardee, serialized_data.span());
-            
-            // Deserialize result
-            let mut result_span = result_data;
-            let result: ISPSwapResult = core::serde::Serde::deserialize(ref result_span).unwrap();
-            
-            result
-        }
-
-        /// Execute regular swap with fee collection
-        fn _execute_regular_swap_with_fees(
-            ref self: ContractState,
-            pool_key: PoolKey,
-            params: SwapParameters,
-            token_in: ContractAddress,
-            amount_in_max: u128,
-            amount_out_min: u128,
-            user: ContractAddress
-        ) -> Delta {
-            let core = self.core.read();
-            
-            // Calculate fee to collect
-            let fee_amount = (amount_in_max * self.fee_percentage.read()) / 10000;
-            let swap_amount = amount_in_max - fee_amount;
-            
-            // Collect tokens from user
-            let token_in_contract = IERC20Dispatcher { contract_address: token_in };
-            let amount_in_u256: u256 = amount_in_max.into();
-            token_in_contract.transferFrom(user, get_contract_address(), amount_in_u256);
-            
-            // Pay swap amount to core
-            let swap_amount_u256: u256 = swap_amount.into();
-            token_in_contract.approve(core.contract_address, swap_amount_u256);
-            core.pay(token_in);
-            
-            // Execute the swap
-            let adjusted_params = SwapParameters {
-                amount: i129 { mag: swap_amount, sign: params.amount.sign },
-                is_token1: params.is_token1,
-                sqrt_ratio_limit: params.sqrt_ratio_limit,
-                skip_ahead: params.skip_ahead,
+                pool_key: callback_data.pool_key,
+                params: callback_data.params,
+                user: callback_data.caller,
+                max_fee_amount: 0, // Not used for exact input swaps
             };
             
-            let delta = core.swap(pool_key, adjusted_params);
+            // Forward to ISP extension and get result
+            let isp_result: ISPSwapResult = forward_lock(
+                core,
+                IForwardeeDispatcher { contract_address: callback_data.pool_key.extension },
+                @isp_data
+            );
             
-            // Withdraw output tokens to user
-            let token_out = if token_in == pool_key.token0 { pool_key.token1 } else { pool_key.token0 };
-            let output_amount = if params.is_token1 { delta.amount1.mag } else { delta.amount0.mag };
+            // Calculate actual output amount (after fees)
+            let output_amount = if callback_data.params.is_token1 { 
+                isp_result.total_delta.amount1.mag 
+            } else { 
+                isp_result.total_delta.amount0.mag 
+            };
             
-            assert(output_amount >= amount_out_min, 'Insufficient output');
+            // Verify output meets minimum
+            assert(output_amount >= callback_data.amount_out_min, 'Insufficient output');
             
-            core.withdraw(token_out, user, output_amount);
+            // Note: ISP already handles withdrawing tokens to user, so we don't need to do it here
             
-            // Accumulate fees if pool supports ISP
-            if self.isp_extensions.read(pool_key.extension) && fee_amount > 0 {
-                let isp_manager = IPositionManagerISPDispatcher { contract_address: pool_key.extension };
-                
-                // Transfer fee to ISP manager through core
-                let fee_amount_u256: u256 = fee_amount.into();
-                token_in_contract.approve(pool_key.extension, fee_amount_u256);
-                
-                // Tell ISP manager to accumulate the fees
-                IPositionManagerISPDispatcherTrait::accumulate_fees(isp_manager, pool_key, token_in, fee_amount);
-                
-                self.emit(FeesAccumulated { 
-                    pool_key, 
-                    token: token_in, 
-                    amount: fee_amount 
-                });
-            }
+            // Emit event
+            self.emit(SwapExecuted {
+                pool_key: callback_data.pool_key,
+                user: callback_data.caller,
+                amount_in: callback_data.amount_in,
+                amount_out: output_amount,
+                fee_collected: isp_result.fee_collected,
+            });
             
-            delta
-        }
-
-        /// Check if this is an ETH for token swap
-        fn _is_eth_for_token_swap(
-            self: @ContractState,
-            pool_key: PoolKey,
-            params: SwapParameters,
-            native_token: ContractAddress
-        ) -> bool {
-            let native_is_token0 = native_token == pool_key.token0;
-            (native_is_token0 && !params.is_token1) || (!native_is_token0 && params.is_token1)
+            // Return the result using serialize helper
+            serialize(@isp_result).span()
         }
     }
 }

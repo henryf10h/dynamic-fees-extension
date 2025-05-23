@@ -256,3 +256,6 @@ mod Memecoin {
     }
 }
 
+//todo: change this to the treasury address.
+//No treasury contracts yet. Coming soon.
+
