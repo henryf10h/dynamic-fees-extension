@@ -7,3 +7,11 @@ edition = "2024_07"
 starknet = ">=2.6.3"
 openzeppelin = { git = "https://github.com/OpenZeppelin/cairo-contracts", tag = "v2.0.0-alpha.1" }
 ekubo = { git = "https://github.com/ekuboprotocol/abis" }
+
+[cairo]
+sierra-replace-ids = true
+
+[[target.starknet-contract]]
+allowed-libfuncs-list.name = "all"
+casm = true
+build-external-contracts = ["ekubo::*"]
