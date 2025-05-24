@@ -2,9 +2,6 @@
 use ekubo::interfaces::core::{
     ICoreDispatcher, SwapParameters
 };
-// use ekubo::interfaces::mathlib::{
-//         IMathLibLibraryDispatcher, IMathLibDispatcherTrait, dispatcher as mathlib
-//     };
 use ekubo::types::delta::{Delta};
 use ekubo::types::keys::{PoolKey};
 use starknet::{ContractAddress};
@@ -32,6 +29,8 @@ pub struct ISPSwapResult {
     pub prefill_amount: u128,         // Amount prefilled from fees
     pub fee_collected: u128,          // Fee collected from output
     pub swap_amount: u128,            // Amount swapped through core
+    pub output_amount: u128,          // Total output amount to send to user
+    pub output_token: ContractAddress, // Token to send to user
 }
 
 #[starknet::interface]
@@ -94,6 +93,7 @@ pub mod isp_component {
         FeesAccumulated: FeesAccumulated,
         PrefillExecuted: PrefillExecuted,
         OutputFeeCollected: OutputFeeCollected,
+        SwapFeeCollected: SwapFeeCollected,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -122,6 +122,14 @@ pub mod isp_component {
         pub user: ContractAddress,
         pub output_token: ContractAddress,
         pub fee_amount: u128,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    pub struct SwapFeeCollected {
+        #[key]
+        pub pool_key: PoolKey,
+        pub token: ContractAddress,
+        pub amount: u128,
     }
 
     #[embeddable_as(ISPImpl)]
@@ -200,10 +208,11 @@ pub mod isp_component {
             let mut eth_saved = 0_u128;
             
             if self.can_use_prefill(pool_key, params) {
-                // Get current pool price
+                // Get current pool price AND tick
                 let pool_price = core.get_pool_price(pool_key);
+                let current_tick = pool_price.tick;
                 
-                // Calculate prefill amounts using actual price
+                // Calculate prefill amounts using actual price range
                 let available_token_fees = if token0_is_native {
                     self.pool_fees.read(pool_key).amount1
                 } else {
@@ -213,7 +222,8 @@ pub mod isp_component {
                 // Calculate how much ETH we can save by using available token fees
                 eth_saved = InternalImpl::_calculate_eth_equivalent(
                     @self,
-                    pool_price.sqrt_ratio,
+                    pool_key,
+                    current_tick,
                     available_token_fees,
                     token0_is_native,
                     math
@@ -225,7 +235,8 @@ pub mod isp_component {
                 // Calculate how many tokens we need to prefill based on ETH saved
                 prefill_amount = InternalImpl::_calculate_token_amount_from_eth(
                     @self,
-                    pool_price.sqrt_ratio,
+                    pool_key,
+                    current_tick,
                     eth_saved,
                     token0_is_native,
                     math
@@ -235,7 +246,7 @@ pub mod isp_component {
                 prefill_amount = core::cmp::min(prefill_amount, available_token_fees);
                 
                 if prefill_amount > 0 {
-                    // Execute prefill: load and prepare tokens from fees
+                    // Execute prefill: load tokens from saved fees
                     InternalImpl::_execute_prefill(
                         ref self, 
                         pool_key, 
@@ -279,45 +290,80 @@ pub mod isp_component {
                 } else {
                     swap_delta.amount0.mag
                 };
+                
+                // Collect fee from swap output (this is the missing part mentioned!)
+                if swap_output > 0 {
+                    let swap_fee = (swap_output * self.fee_percentage.read()) / 10000;
+                    swap_output -= swap_fee;
+                    
+                    if swap_fee > 0 {
+                        // Save the swap fee for future use
+                        let saved_balance_key = SavedBalanceKey {
+                            owner: get_contract_address(),
+                            token: output_token,
+                            salt: InternalImpl::_get_fee_salt(@self, pool_key, output_token),
+                        };
+                        core.save(saved_balance_key, swap_fee);
+                        
+                        // Update internal tracking
+                        InternalImpl::_update_fee_tracking(ref self, pool_key, output_token, swap_fee);
+                        
+                        self.emit(SwapFeeCollected {
+                            pool_key,
+                            token: output_token,
+                            amount: swap_fee,
+                        });
+                    }
+                }
             }
             
-            // Total output before fees (prefill + swap)
+            // Total output before final fee (prefill + swap after swap fee)
             let total_output_before_fee = prefill_amount + swap_output;
             
-            // Calculate fee from total output
-            let fee_amount = (total_output_before_fee * self.fee_percentage.read()) / 10000;
-            let output_after_fee = total_output_before_fee - fee_amount;
+            // Calculate fee from prefill amount only (swap already had fee deducted)
+            let prefill_fee = if prefill_amount > 0 {
+                (prefill_amount * self.fee_percentage.read()) / 10000
+            } else {
+                0
+            };
             
-            // Handle token distributions via core.withdraw
-            if total_output_before_fee > 0 {
-                // Withdraw output to user (after fee)
-                if output_after_fee > 0 {
-                    core.withdraw(output_token, user, output_after_fee);
-                }
-                
-                // Withdraw fee to ISP contract and save it
-                if fee_amount > 0 {
-                    core.withdraw(output_token, get_contract_address(), fee_amount);
-                    
-                    // Save the fee for future use
-                    let saved_balance_key = SavedBalanceKey {
-                        owner: get_contract_address(),
-                        token: output_token,
-                        salt: InternalImpl::_get_fee_salt(@self, pool_key, output_token),
-                    };
-                    core.save(saved_balance_key, fee_amount);
-                    
-                    // Update internal tracking
-                    InternalImpl::_update_fee_tracking(ref self, pool_key, output_token, fee_amount);
-                }
+            let total_fee = prefill_fee + if remaining_eth > 0 {
+                (swap_output * self.fee_percentage.read()) / 10000
+            } else {
+                0
+            };
+            
+            let output_after_fee = total_output_before_fee - prefill_fee;
+            
+            // Save tokens for user withdrawal by router
+            if output_after_fee > 0 {
+                // Generate a unique salt for this user's withdrawal
+                let user_salt = InternalImpl::_get_user_withdrawal_salt(@self, user);
+                let user_balance_key = SavedBalanceKey {
+                    owner: get_contract_address(),
+                    token: output_token,
+                    salt: user_salt,
+                };
+                core.save(user_balance_key, output_after_fee);
             }
             
-            if fee_amount > 0 {
+            // Save the prefill fee
+            if prefill_fee > 0 {
+                let saved_balance_key = SavedBalanceKey {
+                    owner: get_contract_address(),
+                    token: output_token,
+                    salt: InternalImpl::_get_fee_salt(@self, pool_key, output_token),
+                };
+                core.save(saved_balance_key, prefill_fee);
+                
+                // Update internal tracking
+                InternalImpl::_update_fee_tracking(ref self, pool_key, output_token, prefill_fee);
+                
                 self.emit(OutputFeeCollected {
                     pool_key,
                     user,
                     output_token,
-                    fee_amount,
+                    fee_amount: prefill_fee,
                 });
             }
             
@@ -337,8 +383,10 @@ pub mod isp_component {
             ISPSwapResult {
                 total_delta,
                 prefill_amount,
-                fee_collected: fee_amount,
+                fee_collected: total_fee,
                 swap_amount: remaining_eth,
+                output_amount: output_after_fee,
+                output_token,
             }
         }
 
@@ -357,47 +405,83 @@ pub mod isp_component {
     pub impl InternalImpl<
         TContractState, +HasComponent<TContractState>
     > of InternalTrait<TContractState> {
-        /// Calculate ETH equivalent of token amount using pool price
+        /// Calculate price bounds using tick spacing
+        fn _get_price_bounds(
+            self: @ComponentState<TContractState>,
+            pool_key: PoolKey,
+            current_tick: i129,
+            mathlib: IMathLibLibraryDispatcher
+        ) -> (u256, u256) {
+            // Use pool's tick spacing for accurate price calculation
+            let tick_spacing = pool_key.tick_spacing;
+            
+            // Align to tick spacing
+            let aligned_tick = if current_tick.mag % tick_spacing == 0 {
+                current_tick
+            } else {
+                // Round down to nearest tick spacing
+                let remainder = current_tick.mag % tick_spacing;
+                if current_tick.sign {
+                    // Negative tick
+                    i129 { mag: current_tick.mag + (tick_spacing - remainder), sign: true }
+                } else {
+                    // Positive tick
+                    i129 { mag: current_tick.mag - remainder, sign: false }
+                }
+            };
+            
+            // Get sqrt ratios for the range
+            let sqrt_ratio_lower = mathlib.tick_to_sqrt_ratio(aligned_tick);
+            let sqrt_ratio_upper = mathlib.tick_to_sqrt_ratio(
+                aligned_tick + i129 { mag: tick_spacing, sign: false }
+            );
+            
+            (sqrt_ratio_lower, sqrt_ratio_upper)
+        }
+
+        /// Calculate ETH equivalent of token amount using proper price range
         fn _calculate_eth_equivalent(
             self: @ComponentState<TContractState>,
-            sqrt_ratio: u256,
+            pool_key: PoolKey,
+            current_tick: i129,
             token_amount: u128,
             token0_is_native: bool,
             mathlib: IMathLibLibraryDispatcher
         ) -> u128 {
-            // For ETH/Token pools:
-            // If ETH is token0: price = token1/token0 = token_per_eth
-            // If ETH is token1: price = token0/token1 = 1/token_per_eth
+            let (sqrt_ratio_lower, sqrt_ratio_upper) = self._get_price_bounds(
+                pool_key, current_tick, mathlib
+            );
             
-            // We need to provide proper sqrt_ratio bounds for the calculation
-            // Using the current price as both bounds gives us the spot conversion
             if token0_is_native {
                 // ETH is token0, we have token1
-                // amount0 = amount1 / price
-                mathlib.amount0_delta(sqrt_ratio, sqrt_ratio, token_amount, false)
+                // Calculate amount0 needed for given amount1
+                mathlib.amount0_delta(sqrt_ratio_lower, sqrt_ratio_upper, token_amount, false)
             } else {
                 // ETH is token1, we have token0
-                // amount1 = amount0 * price
-                mathlib.amount1_delta(sqrt_ratio, sqrt_ratio, token_amount, false)
+                // Calculate amount1 needed for given amount0
+                mathlib.amount1_delta(sqrt_ratio_lower, sqrt_ratio_upper, token_amount, false)
             }
         }
         
-        /// Calculate token amount needed for given ETH amount
+        /// Calculate token amount from ETH using proper price range
         fn _calculate_token_amount_from_eth(
             self: @ComponentState<TContractState>,
-            sqrt_ratio: u256,
+            pool_key: PoolKey,
+            current_tick: i129,
             eth_amount: u128,
             token0_is_native: bool,
             mathlib: IMathLibLibraryDispatcher
         ) -> u128 {
+            let (sqrt_ratio_lower, sqrt_ratio_upper) = self._get_price_bounds(
+                pool_key, current_tick, mathlib
+            );
+            
             if token0_is_native {
                 // ETH is token0, calculate token1 amount
-                // amount1 = amount0 * price
-                mathlib.amount1_delta(sqrt_ratio, sqrt_ratio, eth_amount, false)
+                mathlib.amount1_delta(sqrt_ratio_lower, sqrt_ratio_upper, eth_amount, false)
             } else {
                 // ETH is token1, calculate token0 amount
-                // amount0 = amount1 / price
-                mathlib.amount0_delta(sqrt_ratio, sqrt_ratio, eth_amount, false)
+                mathlib.amount0_delta(sqrt_ratio_lower, sqrt_ratio_upper, eth_amount, false)
             }
         }
         
@@ -422,7 +506,6 @@ pub mod isp_component {
             
             // Update fee tracking
             let mut current_fees = self.pool_fees.read(pool_key);
-            // let native_token = self.native_token.read();
             
             if token == pool_key.token0 {
                 current_fees.amount0 -= token_amount;
@@ -462,6 +545,16 @@ pub mod isp_component {
             let token_felt: felt252 = token.into();
             let fee_felt: felt252 = pool_key.fee.into();
             token_felt + fee_felt
+        }
+        
+        /// Generate salt for user withdrawal
+        fn _get_user_withdrawal_salt(
+            self: @ComponentState<TContractState>,
+            user: ContractAddress
+        ) -> felt252 {
+            // Simple salt based on user address
+            let user_felt: felt252 = user.into();
+            user_felt + 'user_withdrawal'
         }
     }
 }

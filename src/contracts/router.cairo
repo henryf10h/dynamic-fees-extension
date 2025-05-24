@@ -9,6 +9,7 @@ pub mod ISPRouter {
         call_core_with_callback, consume_callback_data, forward_lock
     };
     use ekubo::components::util::{serialize};
+    use ekubo::types::i129::{i129};
     use ekubo::interfaces::core::{
         ICoreDispatcher, ICoreDispatcherTrait, SwapParameters, IForwardeeDispatcher, ILocker
     };
@@ -158,7 +159,7 @@ pub mod ISPRouter {
                 @callback_data
             )
         }
-
+        
         /// Preview potential ISP prefill with proper price calculation
         fn preview_isp_swap(
             self: @ContractState,
@@ -170,8 +171,9 @@ pub mod ISPRouter {
             let can_prefill = IPositionManagerISPDispatcherTrait::can_use_prefill(isp_manager, pool_key, params);
             
             let potential_prefill_eth = if can_prefill {
-                // Get current pool price
+                // Get current pool price AND tick
                 let pool_price = self.core.read().get_pool_price(pool_key);
+                let current_tick = pool_price.tick;
                 let mathlib = mathlib();
                 
                 // Determine which token is native and which fees are available
@@ -194,22 +196,41 @@ pub mod ISPRouter {
                 };
                 
                 if available_output_fees > 0 {
-                    // Calculate ETH equivalent using the same spot price for both bounds
+                    // Get price bounds based on tick spacing
+                    let tick_spacing = pool_key.tick_spacing;
+                    
+                    // Align to tick spacing
+                    let aligned_tick = if current_tick.mag % tick_spacing == 0 {
+                        current_tick
+                    } else {
+                        let remainder = current_tick.mag % tick_spacing;
+                        if current_tick.sign {
+                            i129 { mag: current_tick.mag + (tick_spacing - remainder), sign: true }
+                        } else {
+                            i129 { mag: current_tick.mag - remainder, sign: false }
+                        }
+                    };
+                    
+                    // Get sqrt ratios for the range
+                    let sqrt_ratio_lower = mathlib.tick_to_sqrt_ratio(aligned_tick);
+                    let sqrt_ratio_upper = mathlib.tick_to_sqrt_ratio(
+                        aligned_tick + i129 { mag: tick_spacing, sign: false }
+                    );
+                    
+                    // Calculate ETH equivalent using proper price range
                     let eth_equivalent = if token0_is_native {
                         // ETH is token0, we have token1 fees
-                        // amount0 = amount1 / price
                         mathlib.amount0_delta(
-                            pool_price.sqrt_ratio, 
-                            pool_price.sqrt_ratio,
+                            sqrt_ratio_lower, 
+                            sqrt_ratio_upper,
                             available_output_fees,
                             false
                         )
                     } else {
                         // ETH is token1, we have token0 fees
-                        // amount1 = amount0 * price
                         mathlib.amount1_delta(
-                            pool_price.sqrt_ratio, 
-                            pool_price.sqrt_ratio,
+                            sqrt_ratio_lower, 
+                            sqrt_ratio_upper,
                             available_output_fees,
                             false
                         )
@@ -228,6 +249,19 @@ pub mod ISPRouter {
         }
     }
 
+    #[generate_trait]
+    impl InternalImpl of InternalTrait {
+        /// Generate salt for user withdrawal from ISP
+        fn _get_user_withdrawal_salt(
+            self: @ContractState,
+            user: ContractAddress
+        ) -> felt252 {
+            // Must match the salt generation in ISP component
+            let user_felt: felt252 = user.into();
+            user_felt + 'user_withdrawal'
+        }
+    }
+
     // Locker implementation - this is where the core logic happens
     #[abi(embed_v0)]
     impl LockerImpl of ILocker<ContractState> {
@@ -240,11 +274,7 @@ pub mod ISPRouter {
             // Transfer input tokens from caller to router
             let token_in_contract = IERC20Dispatcher { contract_address: callback_data.token_in };
             let amount_in_u256: u256 = callback_data.amount_in.into();
-            token_in_contract.transferFrom(
-                callback_data.caller, 
-                get_contract_address(), 
-                amount_in_u256
-            );
+            token_in_contract.transferFrom(callback_data.caller, get_contract_address(), amount_in_u256);
             
             // Approve and pay to core
             token_in_contract.approve(core.contract_address, amount_in_u256);
@@ -265,24 +295,29 @@ pub mod ISPRouter {
                 @isp_data
             );
             
-            // Calculate actual output amount (after fees)
-            let output_amount = if callback_data.params.is_token1 { 
-                isp_result.total_delta.amount1.mag 
-            } else { 
-                isp_result.total_delta.amount0.mag 
-            };
-            
             // Verify output meets minimum
-            assert(output_amount >= callback_data.amount_out_min, 'Insufficient output');
+            assert(isp_result.output_amount >= callback_data.amount_out_min, 'Insufficient output');
             
-            // Note: ISP already handles withdrawing tokens to user, so we don't need to do it here
+            // FIXED: Now we need to withdraw the tokens to the user
+            // The ISP has saved the output tokens for the user, we need to load and withdraw them
+            if isp_result.output_amount > 0 {
+                // Load the tokens that ISP saved for the user
+                // let user_salt = InternalImpl::_get_user_withdrawal_salt(
+                //     @self,
+                //     callback_data.caller
+                // );
+                // core.load(isp_result.output_token, user_salt, isp_result.output_amount);
+                
+                // Withdraw the tokens to the user
+                core.withdraw(isp_result.output_token, callback_data.caller, isp_result.output_amount);
+            }
             
             // Emit event
             self.emit(SwapExecuted {
                 pool_key: callback_data.pool_key,
                 user: callback_data.caller,
                 amount_in: callback_data.amount_in,
-                amount_out: output_amount,
+                amount_out: isp_result.output_amount,
                 fee_collected: isp_result.fee_collected,
             });
             
