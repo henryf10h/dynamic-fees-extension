@@ -2,6 +2,9 @@
 use ekubo::interfaces::core::{
     ICoreDispatcher, SwapParameters
 };
+// use ekubo::interfaces::mathlib::{
+//         IMathLibLibraryDispatcher, IMathLibDispatcherTrait, dispatcher as mathlib
+//     };
 use ekubo::types::delta::{Delta};
 use ekubo::types::keys::{PoolKey};
 use starknet::{ContractAddress};
@@ -64,6 +67,9 @@ pub trait IISP<TState> {
 pub mod isp_component {
     use super::{ClaimableFees, ISPSwapResult, IISP};
     use ekubo::interfaces::core::{ICoreDispatcher, ICoreDispatcherTrait, SwapParameters};
+    use ekubo::interfaces::mathlib::{
+        IMathLibLibraryDispatcher, IMathLibDispatcherTrait, dispatcher as mathlib
+    };
     use ekubo::types::delta::{Delta};
     use ekubo::types::i129::{i129};
     use ekubo::types::keys::{PoolKey, SavedBalanceKey};
@@ -105,7 +111,7 @@ pub mod isp_component {
         #[key]
         pub user: ContractAddress,
         pub prefill_amount: u128,
-        pub eth_received: u128,
+        pub eth_saved: u128,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -179,6 +185,7 @@ pub mod isp_component {
             max_fee_amount: u128
         ) -> ISPSwapResult {
             let core = self.core.read();
+            let math = mathlib();
             let native_token = self.native_token.read();
             
             // Determine token addresses
@@ -190,19 +197,42 @@ pub mod isp_component {
             
             // Check if we can use prefill
             let mut prefill_amount = 0_u128;
+            let mut eth_saved = 0_u128;
             
             if self.can_use_prefill(pool_key, params) {
-                // Calculate prefill amounts
+                // Get current pool price
+                let pool_price = core.get_pool_price(pool_key);
+                
+                // Calculate prefill amounts using actual price
                 let available_token_fees = if token0_is_native {
                     self.pool_fees.read(pool_key).amount1
                 } else {
                     self.pool_fees.read(pool_key).amount0
                 };
                 
-                // For exact input ETH swaps, we can prefill up to the available token fees
-                // The prefill amount is in terms of output tokens we can provide
-                // TODO: Use actual price to calculate how much ETH this saves
-                prefill_amount = core::cmp::min(available_token_fees, params.amount.mag);
+                // Calculate how much ETH we can save by using available token fees
+                eth_saved = InternalImpl::_calculate_eth_equivalent(
+                    @self,
+                    pool_price.sqrt_ratio,
+                    available_token_fees,
+                    token0_is_native,
+                    math
+                );
+                
+                // Can't save more ETH than the input amount
+                eth_saved = core::cmp::min(eth_saved, params.amount.mag);
+                
+                // Calculate how many tokens we need to prefill based on ETH saved
+                prefill_amount = InternalImpl::_calculate_token_amount_from_eth(
+                    @self,
+                    pool_price.sqrt_ratio,
+                    eth_saved,
+                    token0_is_native,
+                    math
+                );
+                
+                // Ensure we don't prefill more than available
+                prefill_amount = core::cmp::min(prefill_amount, available_token_fees);
                 
                 if prefill_amount > 0 {
                     // Execute prefill: load and prepare tokens from fees
@@ -217,16 +247,14 @@ pub mod isp_component {
                         pool_key,
                         user,
                         prefill_amount,
-                        eth_received: prefill_amount, // Simplified: 1:1 for now
+                        eth_saved,
                     });
                 }
             }
             
-            // Calculate remaining swap amount in ETH terms
-            // If we prefilled X tokens worth Y ETH, reduce swap by Y
-            let eth_used_for_prefill = prefill_amount; // Simplified: 1:1 ratio
-            let remaining_eth = if params.amount.mag > eth_used_for_prefill {
-                params.amount.mag - eth_used_for_prefill
+            // Calculate remaining swap amount
+            let remaining_eth = if params.amount.mag > eth_saved {
+                params.amount.mag - eth_saved
             } else {
                 0
             };
@@ -329,6 +357,50 @@ pub mod isp_component {
     pub impl InternalImpl<
         TContractState, +HasComponent<TContractState>
     > of InternalTrait<TContractState> {
+        /// Calculate ETH equivalent of token amount using pool price
+        fn _calculate_eth_equivalent(
+            self: @ComponentState<TContractState>,
+            sqrt_ratio: u256,
+            token_amount: u128,
+            token0_is_native: bool,
+            mathlib: IMathLibLibraryDispatcher
+        ) -> u128 {
+            // For ETH/Token pools:
+            // If ETH is token0: price = token1/token0 = token_per_eth
+            // If ETH is token1: price = token0/token1 = 1/token_per_eth
+            
+            // We need to provide proper sqrt_ratio bounds for the calculation
+            // Using the current price as both bounds gives us the spot conversion
+            if token0_is_native {
+                // ETH is token0, we have token1
+                // amount0 = amount1 / price
+                mathlib.amount0_delta(sqrt_ratio, sqrt_ratio, token_amount, false)
+            } else {
+                // ETH is token1, we have token0
+                // amount1 = amount0 * price
+                mathlib.amount1_delta(sqrt_ratio, sqrt_ratio, token_amount, false)
+            }
+        }
+        
+        /// Calculate token amount needed for given ETH amount
+        fn _calculate_token_amount_from_eth(
+            self: @ComponentState<TContractState>,
+            sqrt_ratio: u256,
+            eth_amount: u128,
+            token0_is_native: bool,
+            mathlib: IMathLibLibraryDispatcher
+        ) -> u128 {
+            if token0_is_native {
+                // ETH is token0, calculate token1 amount
+                // amount1 = amount0 * price
+                mathlib.amount1_delta(sqrt_ratio, sqrt_ratio, eth_amount, false)
+            } else {
+                // ETH is token1, calculate token0 amount
+                // amount0 = amount1 / price
+                mathlib.amount0_delta(sqrt_ratio, sqrt_ratio, eth_amount, false)
+            }
+        }
+        
         /// Execute prefill operation - load tokens from saved fees
         fn _execute_prefill(
             ref self: ComponentState<TContractState>,
@@ -350,13 +422,11 @@ pub mod isp_component {
             
             // Update fee tracking
             let mut current_fees = self.pool_fees.read(pool_key);
-            let native_token = self.native_token.read();
+            // let native_token = self.native_token.read();
             
-            if token == native_token {
-                // This shouldn't happen - we don't prefill with native token
-                assert(token != native_token, 'Cant prefill with native token');
+            if token == pool_key.token0 {
+                current_fees.amount0 -= token_amount;
             } else {
-                // Reduce non-native token fees
                 current_fees.amount1 -= token_amount;
             }
             self.pool_fees.write(pool_key, current_fees);
@@ -371,9 +441,8 @@ pub mod isp_component {
         ) {
             // Update internal tracking
             let mut current_fees = self.pool_fees.read(pool_key);
-            let native_token = self.native_token.read();
             
-            if token == native_token {
+            if token == pool_key.token0 {
                 current_fees.amount0 += amount;
             } else {
                 current_fees.amount1 += amount;

@@ -20,6 +20,7 @@ pub mod PositionManager {
     use starknet::storage::{
         StoragePointerReadAccess
     };
+    use ekubo::interfaces::mathlib::{IMathLibDispatcher};
 
     // Import our ISP component
     use relaunch::contracts::internal_swap_pool::{isp_component};
@@ -58,10 +59,11 @@ pub mod PositionManager {
         owner: ContractAddress,
         core: ICoreDispatcher,
         native_token: ContractAddress,
+        math: IMathLibDispatcher
     ) {
         self.initialize_owned(owner);
         
-        // Initialize ISP component with 0.3% fee
+        // Pass the dispatcher to initialize
         ISPImpl::initialize(ref self, native_token, core, 30);
         
         // Set call points - minimal requirements for ISP

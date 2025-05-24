@@ -12,11 +12,13 @@ pub mod ISPRouter {
     use ekubo::interfaces::core::{
         ICoreDispatcher, ICoreDispatcherTrait, SwapParameters, IForwardeeDispatcher, ILocker
     };
+    use ekubo::interfaces::mathlib::{IMathLibDispatcherTrait, dispatcher as mathlib};
     use ekubo::interfaces::erc20::{IERC20Dispatcher, IERC20DispatcherTrait};
-
     use ekubo::types::keys::{PoolKey};
     use starknet::{get_contract_address, get_caller_address, ContractAddress};
-    use starknet::storage::{StoragePointerWriteAccess, StoragePointerReadAccess};
+    use starknet::storage::{
+        StoragePointerWriteAccess,
+        StoragePointerReadAccess};
 
     // Import ISP types
     use relaunch::contracts::internal_swap_pool::{ISPSwapData, ISPSwapResult, ClaimableFees};
@@ -129,6 +131,14 @@ pub mod ISPRouter {
             // Verify this is an exact input swap
             assert(!params.amount.sign, 'Only exact input swaps');
             assert(params.amount.mag == amount_in, 'Amount mismatch');
+            
+            // Verify token_in matches the swap direction
+            let is_token0_to_token1 = !params.is_token1;
+            if is_token0_to_token1 {
+                assert(token_in == pool_key.token0, 'Token mismatch');
+            } else {
+                assert(token_in == pool_key.token1, 'Token mismatch');
+            }
 
             let caller = get_caller_address();
             
@@ -149,7 +159,7 @@ pub mod ISPRouter {
             )
         }
 
-        /// Preview potential ISP prefill
+        /// Preview potential ISP prefill with proper price calculation
         fn preview_isp_swap(
             self: @ContractState,
             pool_key: PoolKey,
@@ -159,17 +169,62 @@ pub mod ISPRouter {
             let available_fees = IPositionManagerISPDispatcherTrait::get_pool_fees(isp_manager, pool_key);
             let can_prefill = IPositionManagerISPDispatcherTrait::can_use_prefill(isp_manager, pool_key, params);
             
-            let potential_prefill = if can_prefill {
-                if params.amount.sign {
-                    core::cmp::min(available_fees.amount1, params.amount.mag)
+            let potential_prefill_eth = if can_prefill {
+                // Get current pool price
+                let pool_price = self.core.read().get_pool_price(pool_key);
+                let mathlib = mathlib();
+                
+                // Determine which token is native and which fees are available
+                let native_token = IPositionManagerISPDispatcherTrait::get_native_token(isp_manager);
+                let token0_is_native = native_token == pool_key.token0;
+                
+                // If we're swapping ETH for tokens, we need token fees (non-ETH)
+                let available_output_fees = if token0_is_native {
+                    // Native is token0, so we need token1 fees for ETH→Token1 swap
+                    if !params.is_token1 {
+                        available_fees.amount1  // Swapping token0 (ETH) for token1
+                    } else {
+                        0  // Can't prefill Token1→ETH swap
+                    }
+                } else if params.is_token1 {
+                    // Native is token1, so we need token0 fees for ETH→Token0 swap
+                    available_fees.amount0  // Swapping token1 (ETH) for token0
                 } else {
-                    core::cmp::min(available_fees.amount1, params.amount.mag)
+                    0  // Can't prefill Token0→ETH swap
+                };
+                
+                if available_output_fees > 0 {
+                    // Calculate ETH equivalent using the same spot price for both bounds
+                    let eth_equivalent = if token0_is_native {
+                        // ETH is token0, we have token1 fees
+                        // amount0 = amount1 / price
+                        mathlib.amount0_delta(
+                            pool_price.sqrt_ratio, 
+                            pool_price.sqrt_ratio,
+                            available_output_fees,
+                            false
+                        )
+                    } else {
+                        // ETH is token1, we have token0 fees
+                        // amount1 = amount0 * price
+                        mathlib.amount1_delta(
+                            pool_price.sqrt_ratio, 
+                            pool_price.sqrt_ratio,
+                            available_output_fees,
+                            false
+                        )
+                    };
+                    
+                    // Don't prefill more than the swap amount
+                    core::cmp::min(eth_equivalent, params.amount.mag)
+                } else {
+                    0
                 }
             } else {
                 0
             };
 
-            (can_prefill, available_fees, potential_prefill)
+            (can_prefill, available_fees, potential_prefill_eth)
         }
     }
 
