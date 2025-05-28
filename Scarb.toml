@@ -3,6 +3,7 @@ name = "relaunch"
 version = "0.1.0"
 edition = "2024_07"
 
+
 [dependencies]
 starknet = ">=2.6.3"
 openzeppelin = { git = "https://github.com/OpenZeppelin/cairo-contracts", tag = "v2.0.0-alpha.1" }
@@ -10,8 +11,11 @@ ekubo = { git = "https://github.com/ekuboprotocol/abis" }
 
 [cairo]
 sierra-replace-ids = true
+sierra = true
+casm = true
 
 [[target.starknet-contract]]
 allowed-libfuncs-list.name = "all"
 casm = true
+sierra = true
 build-external-contracts = ["ekubo::*"]

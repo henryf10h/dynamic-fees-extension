@@ -16,11 +16,11 @@ pub mod PositionManager {
     use ekubo::types::delta::{Delta};
     use ekubo::types::i129::{i129};
     use ekubo::types::keys::{PoolKey};
-    use starknet::{ContractAddress};
+    use starknet::{ContractAddress, get_contract_address};
     use starknet::storage::{
         StoragePointerReadAccess
     };
-    use ekubo::interfaces::mathlib::{IMathLibDispatcher};
+    // use ekubo::interfaces::mathlib::{IMathLibDispatcher};
 
     // Import our ISP component
     use relaunch::contracts::internal_swap_pool::{isp_component};
@@ -59,7 +59,7 @@ pub mod PositionManager {
         owner: ContractAddress,
         core: ICoreDispatcher,
         native_token: ContractAddress,
-        math: IMathLibDispatcher
+        // math: IMathLibDispatcher
     ) {
         self.initialize_owned(owner);
         
@@ -71,7 +71,7 @@ pub mod PositionManager {
             CallPoints {
                 before_initialize_pool: false,
                 after_initialize_pool: false,
-                before_swap: false,
+                before_swap: true,
                 after_swap: false,
                 before_update_position: false,
                 after_update_position: false,
@@ -119,7 +119,14 @@ pub mod PositionManager {
         // All hooks return immediately - ISP logic happens in forwarded()
         fn before_initialize_pool(ref self: ContractState, caller: ContractAddress, pool_key: PoolKey, initial_tick: i129) {}
         fn after_initialize_pool(ref self: ContractState, caller: ContractAddress, pool_key: PoolKey, initial_tick: i129) {}
-        fn before_swap(ref self: ContractState, caller: ContractAddress, pool_key: PoolKey, params: SwapParameters) {}
+        fn before_swap(ref self: ContractState, caller: ContractAddress, pool_key: PoolKey, params: SwapParameters) {
+            // Allow swaps only from this contract (ISP component calling swap)
+            // Block all external direct swaps - they must go through ISP
+            // This is a security measure to prevent direct swaps
+            // from bypassing the ISP logic
+            let contract_address = get_contract_address();
+            assert(caller == contract_address, 'Only Position_manager for swaps');
+        }
         fn after_swap(ref self: ContractState, caller: ContractAddress, pool_key: PoolKey, params: SwapParameters, delta: Delta) {}
         fn before_update_position(ref self: ContractState, caller: ContractAddress, pool_key: PoolKey, params: UpdatePositionParameters) {}
         fn after_update_position(ref self: ContractState, caller: ContractAddress, pool_key: PoolKey, params: UpdatePositionParameters, delta: Delta) {}

@@ -4,6 +4,7 @@ mod contracts{
     mod position_manager;
     mod internal_swap_pool;
     mod router;
+    mod erc20_token;
 }
 
 mod interfaces{

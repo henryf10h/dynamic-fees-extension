@@ -91,7 +91,7 @@ pub mod ISPRouter {
         params: SwapParameters,
         token_in: ContractAddress,
         amount_in: u128,
-        amount_out_min: u128,
+        
     }
 
     /// Interface for ISP Router
@@ -103,8 +103,8 @@ pub mod ISPRouter {
             params: SwapParameters,
             token_in: ContractAddress,
             amount_in: u128,
-            amount_out_min: u128,
-            deadline: u64
+            
+            
         ) -> ISPSwapResult;
 
         fn preview_isp_swap(
@@ -123,11 +123,10 @@ pub mod ISPRouter {
             params: SwapParameters,
             token_in: ContractAddress,
             amount_in: u128,
-            amount_out_min: u128,
-            deadline: u64
+            
+            
         ) -> ISPSwapResult {
-            // Check deadline
-            assert(starknet::get_block_timestamp() <= deadline, 'Deadline exceeded');
+            
             
             // Verify this is an exact input swap
             assert(!params.amount.sign, 'Only exact input swaps');
@@ -150,7 +149,7 @@ pub mod ISPRouter {
                 params,
                 token_in,
                 amount_in,
-                amount_out_min,
+                
             };
             
             // Use the helper to call core.lock with our callback
@@ -295,8 +294,6 @@ pub mod ISPRouter {
                 @isp_data
             );
             
-            // Verify output meets minimum
-            assert(isp_result.output_amount >= callback_data.amount_out_min, 'Insufficient output');
             
             // FIXED: Now we need to withdraw the tokens to the user
             // The ISP has saved the output tokens for the user, we need to load and withdraw them
