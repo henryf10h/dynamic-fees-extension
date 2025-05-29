@@ -81,10 +81,10 @@ class EkuboPoolCalculator:
         # Calculate sqrt ratio
         price_ratio = token1_amount / token0_amount
         self.sqrt_ratio = math.sqrt(price_ratio)
-        self.initial_price = price_ratio
+        self.initial_price = price_ratio 
         
         # Calculate initial tick using log base 1.000001
-        self.initial_tick = math.log(self.sqrt_ratio) / math.log(1.000001)
+        self.initial_tick = math.log(self.sqrt_ratio) / math.log(math.sqrt(1.000001))
         self.initial_tick = int(self.initial_tick)
         
         print(f"Token1 amount: {token1_amount}")
@@ -149,11 +149,11 @@ class EkuboPoolCalculator:
                 print("Warning: Initial price is outside the specified range!")
             
             # Convert prices to ticks
-            lower_sqrt_ratio = math.sqrt(lower_price)
-            upper_sqrt_ratio = math.sqrt(upper_price)
+            lower_sqrt_ratio = math.sqrt(lower_price) 
+            upper_sqrt_ratio = math.sqrt(upper_price) 
             
-            lower_tick = int(math.log(lower_sqrt_ratio) / math.log(1.000001))
-            upper_tick = int(math.log(upper_sqrt_ratio) / math.log(1.000001))
+            lower_tick = int(math.log(lower_sqrt_ratio) / math.log(math.sqrt(1.000001)))
+            upper_tick = int(math.log(upper_sqrt_ratio) / math.log(math.sqrt(1.000001)))
             
             # Round ticks to valid tick spacing if tick_spacing is set
             if self.tick_spacing is not None:
@@ -190,11 +190,11 @@ class EkuboPoolCalculator:
             return None, None
         
         # Convert prices to ticks
-        lower_sqrt_ratio = math.sqrt(lower_price)
-        upper_sqrt_ratio = math.sqrt(upper_price)
+        lower_sqrt_ratio = math.sqrt(lower_price) 
+        upper_sqrt_ratio = math.sqrt(upper_price) 
         
-        lower_tick = int(math.log(lower_sqrt_ratio) / math.log(1.000001))
-        upper_tick = int(math.log(upper_sqrt_ratio) / math.log(1.000001))
+        lower_tick = int(math.log(lower_sqrt_ratio) / math.log(math.sqrt(1.000001)))
+        upper_tick = int(math.log(upper_sqrt_ratio) / math.log(math.sqrt(1.000001)))
         
         # Round ticks to valid tick spacing if tick_spacing is set
         if self.tick_spacing is not None:
@@ -221,8 +221,8 @@ class EkuboPoolCalculator:
         Where P_a is lower price and P_b is upper price
         """
         # Calculate square roots of price bounds
-        sqrt_P_a = math.sqrt(lower_price)  # √P_a (lower bound)
-        sqrt_P_b = math.sqrt(upper_price)  # √P_b (upper bound)
+        sqrt_P_a = math.sqrt(lower_price) 
+        sqrt_P_b = math.sqrt(upper_price) 
         
         # Calculate liquidity from token0
         # L = amount0 * (√P_a * √P_b) / (√P_b - √P_a)
