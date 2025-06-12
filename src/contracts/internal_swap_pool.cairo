@@ -62,6 +62,9 @@ pub trait IISP<TState> {
     );
 }
 
+// ISP TODO:
+// 1. New logic to get amounts from prices in V2 style
+// 2. Get fees at the end of lock-forward pattern
 #[starknet::component]
 pub mod isp_component {
     use super::{ClaimableFees, ISPSwapResult, IISP};
