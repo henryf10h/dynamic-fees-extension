@@ -30,7 +30,7 @@ class EkuboPoolCalculator:
         """
         Calculate fee using the formula: floor(fee_percent * 2^128)
         """
-        fee_decimal = fee_percent / 100
+        fee_decimal = fee_percent / 100  
         self.fee = math.floor(fee_decimal * 2**128)
         print(f"Fee percentage: {fee_percent}%")
         print(f"Fee calculated: {self.fee}")
@@ -374,19 +374,19 @@ def interactive_demo():
     # Get liquidity amounts
     print("\n2. Liquidity amounts:")
     result = calculator.calculate_sqrt_ratio_and_tick_interactive()
-    if not result[0]:
+    if result[0] is None:
         return None
     
     # Get fee
     print("\n3. Fee configuration:")
     fee_result = calculator.calculate_fee_interactive()
-    if not fee_result:
+    if fee_result is None:  # Only fail if there was an actual error, not if fee is 0
         return None
     
     # Get tick spacing
     print("\n4. Tick spacing:")
     tick_result = calculator.calculate_tick_spacing_interactive()
-    if not tick_result:
+    if tick_result is None:
         return None
     
     # Get bounds and calculate liquidity
@@ -444,18 +444,13 @@ if __name__ == "__main__":
     print("Choose mode:")
     print("1. Example with predefined addresses (press 1)")
     print("2. Full interactive demo (press 2)")
-    print("3. Fix your tick spacing issue (press 3)")
     
     try:
-        choice = input("Enter choice (1, 2, or 3): ").strip()
+        choice = input("Enter choice (1 or 2): ").strip()
         if choice == "1":
             calc = main()
         elif choice == "2":
             calc = interactive_demo()
-        elif choice == "3":
-            # Quick fix for the user's specific case
-            calc = EkuboPoolCalculator()
-            calc.get_corrected_ticks_for_your_case()
         else:
             print("Invalid choice, running example mode...")
             calc = main()
