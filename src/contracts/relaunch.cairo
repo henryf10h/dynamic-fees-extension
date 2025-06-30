@@ -65,7 +65,7 @@ mod Relaunch {
         access_control: AccessControlComponent::Storage,
 
         // Custom storage
-        meme_factory: ClassHash,                            // Class hash for memecoin deployment
+        meme_classhash: ClassHash,                            // Class hash for memecoin deployment
         memecoin_contracts: Map<u256, ContractAddress>,     // token_id -> memecoin address
         memecoin_treasury: Map<u256, ContractAddress>,      // token_id -> treasury address
         last_token_id: u256,                                // Counter for token IDs
@@ -116,7 +116,7 @@ mod Relaunch {
     #[derive(Drop, starknet::Event)]
     struct MemeFactoryUpdated {
         #[key]
-        meme_factory: ClassHash,
+        meme_classhash: ClassHash,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -131,7 +131,7 @@ mod Relaunch {
         name: ByteArray,
         symbol: ByteArray,
         base_uri: ByteArray,
-        meme_factory: ClassHash,
+        meme_classhash: ClassHash,
         admin: ContractAddress,
         position_manager: ContractAddress,
     ) {
@@ -146,7 +146,7 @@ mod Relaunch {
         self.access_control._grant_role(POSITION_MANAGER_ROLE, admin);
         
         // Set up custom storage
-        self.meme_factory.write(meme_factory);
+        self.meme_classhash.write(meme_classhash);
         self.last_token_id.write(0);
         
         // Initialize position manager to zero address until set
@@ -172,8 +172,8 @@ mod Relaunch {
             self.last_token_id.read()
         }
 
-        fn meme_factory(self: @ContractState) -> ClassHash {
-            self.meme_factory.read()
+        fn meme_classhash(self: @ContractState) -> ClassHash {
+            self.meme_classhash.read()
         }
         
         fn position_manager(self: @ContractState) -> ContractAddress {
@@ -193,8 +193,8 @@ mod Relaunch {
             initial_supply: u256,
             treasury: ContractAddress
         ) -> (ContractAddress, u256) {
-            // Check deployer role
-            self._assert_only_deployer();
+            // Check deployer role = position manager contract
+            self._assert_only_position_manager();
             
             let caller = get_caller_address();
             
@@ -210,7 +210,7 @@ mod Relaunch {
             
             // Deploy memecoin contract
             let (memecoin_address, _) = deploy_syscall(
-                self.meme_factory.read(),
+                self.meme_classhash.read(),
                 salt,
                 ArrayTrait::new().span(),  // Empty constructor args
                 false
@@ -246,74 +246,74 @@ mod Relaunch {
         }
         
         // Position Manager functions (to be used with future position manager)
-        fn create_memecoin_from_position_manager(
-            ref self: ContractState,
-            creator: ContractAddress,
-            name: ByteArray,
-            symbol: ByteArray,
-            token_uri: ByteArray,
-            initial_supply: u256,
-            treasury: ContractAddress
-        ) -> (ContractAddress, u256) {
-            // Ensure caller is position manager
-            self._assert_only_position_manager();
+        // fn create_memecoin_from_position_manager(
+        //     ref self: ContractState,
+        //     creator: ContractAddress,
+        //     name: ByteArray,
+        //     symbol: ByteArray,
+        //     token_uri: ByteArray,
+        //     initial_supply: u256,
+        //     treasury: ContractAddress
+        // ) -> (ContractAddress, u256) {
+        //     // Ensure caller is position manager
+        //     self._assert_only_position_manager();
             
-            // Increment token ID
-            let token_id = self.last_token_id.read() + 1;
-            self.last_token_id.write(token_id);
+        //     // Increment token ID
+        //     let token_id = self.last_token_id.read() + 1;
+        //     self.last_token_id.write(token_id);
             
-            // Create unique salt from creator and token_id
-            let mut salt_array = ArrayTrait::new();
-            salt_array.append(creator.into());
-            salt_array.append(token_id.try_into().unwrap());
-            let salt = poseidon_hash_span(salt_array.span());
+        //     // Create unique salt from creator and token_id
+        //     let mut salt_array = ArrayTrait::new();
+        //     salt_array.append(creator.into());
+        //     salt_array.append(token_id.try_into().unwrap());
+        //     let salt = poseidon_hash_span(salt_array.span());
             
-            // Deploy memecoin contract
-            let (memecoin_address, _) = deploy_syscall(
-                self.meme_factory.read(),
-                salt,
-                ArrayTrait::new().span(),  // Empty constructor args
-                false
-            ).unwrap();
+        //     // Deploy memecoin contract
+        //     let (memecoin_address, _) = deploy_syscall(
+        //         self.meme_classhash.read(),
+        //         salt,
+        //         ArrayTrait::new().span(),  // Empty constructor args
+        //         false
+        //     ).unwrap();
             
-            // Initialize the memecoin
-            let mut memecoin = IMemeDispatcher { contract_address: memecoin_address };
-            memecoin.initialize(name, symbol, token_uri);
-            memecoin.set_token_id(token_id);
+        //     // Initialize the memecoin
+        //     let mut memecoin = IMemeDispatcher { contract_address: memecoin_address };
+        //     memecoin.initialize(name, symbol, token_uri);
+        //     memecoin.set_token_id(token_id);
             
-            // Mint initial supply to creator
-            memecoin.mint(creator, initial_supply);
+        //     // Mint initial supply to creator
+        //     memecoin.mint(creator, initial_supply);
             
-            // Store state
-            self.memecoin_contracts.entry(token_id).write(memecoin_address);
-            self.memecoin_treasury.entry(token_id).write(treasury);
-            self.memecoin_to_token_id.entry(memecoin_address).write(token_id);
+        //     // Store state
+        //     self.memecoin_contracts.entry(token_id).write(memecoin_address);
+        //     self.memecoin_treasury.entry(token_id).write(treasury);
+        //     self.memecoin_to_token_id.entry(memecoin_address).write(token_id);
             
-            // Mint NFT to creator
-            self.erc721.mint(creator, token_id);
+        //     // Mint NFT to creator
+        //     self.erc721.mint(creator, token_id);
             
-            // Emit event
-            // self.emit(MemecoinCreated {
-            //     creator,
-            //     token_id,
-            //     memecoin: memecoin_address,
-            //     name,
-            //     symbol,
-            //     token_uri,
-            // });
+        //     // Emit event
+        //     // self.emit(MemecoinCreated {
+        //     //     creator,
+        //     //     token_id,
+        //     //     memecoin: memecoin_address,
+        //     //     name,
+        //     //     symbol,
+        //     //     token_uri,
+        //     // });
             
-            (memecoin_address, token_id)
-        }
+        //     (memecoin_address, token_id)
+        // }
 
         // Admin functions
-        fn set_meme_factory(ref self: ContractState, meme_factory: ClassHash) {
+        fn set_meme_classhash(ref self: ContractState, meme_classhash: ClassHash) {
             // Only owner can set factory
             self.ownable.assert_only_owner();
             
-            self.meme_factory.write(meme_factory);
+            self.meme_classhash.write(meme_classhash);
             
             // Emit event
-            self.emit(MemeFactoryUpdated { meme_factory });
+            self.emit(MemeFactoryUpdated { meme_classhash });
         }
         
         fn set_position_manager(ref self: ContractState, position_manager: ContractAddress) {

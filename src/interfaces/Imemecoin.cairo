@@ -19,5 +19,5 @@ pub trait IMeme<TState> {
     fn relaunch(self: @TState) -> ContractAddress;
     fn token_id(self: @TState) -> u256;
     fn creator(self: @TState) -> ContractAddress;
-    fn treasury(self: @TState) -> ContractAddress;
+    // fn treasury(self: @TState) -> ContractAddress;
 }

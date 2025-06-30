@@ -8,7 +8,7 @@ pub trait IRelaunch<TContractState> {
     fn memecoin_treasury(self: @TContractState, token_id: u256) -> ContractAddress;
     fn memecoin_to_token_id(self: @TContractState, memecoin: ContractAddress) -> u256;
     fn last_token_id(self: @TContractState) -> u256;
-    fn meme_factory(self: @TContractState) -> ClassHash;
+    fn meme_classhash(self: @TContractState) -> ClassHash;
     fn position_manager(self: @TContractState) -> ContractAddress;
     fn memecoin_token_uri(self: @TContractState, token_id: u256) -> ByteArray;
     
@@ -23,18 +23,18 @@ pub trait IRelaunch<TContractState> {
     ) -> (ContractAddress, u256);
     
     // Position Manager functions
-    fn create_memecoin_from_position_manager(
-        ref self: TContractState,
-        creator: ContractAddress,
-        name: ByteArray,
-        symbol: ByteArray,
-        token_uri: ByteArray,
-        initial_supply: u256,
-        treasury: ContractAddress
-    ) -> (ContractAddress, u256);
+//     fn create_memecoin_from_position_manager(
+//         ref self: TContractState,
+//         creator: ContractAddress,
+//         name: ByteArray,
+//         symbol: ByteArray,
+//         token_uri: ByteArray,
+//         initial_supply: u256,
+//         treasury: ContractAddress
+//     ) -> (ContractAddress, u256);
     
     // Admin functions
-    fn set_meme_factory(ref self: TContractState, meme_factory: ClassHash);
+    fn set_meme_classhash(ref self: TContractState, meme_classhash: ClassHash);
     fn set_position_manager(ref self: TContractState, position_manager: ContractAddress);
     fn set_memecoin_treasury(ref self: TContractState, token_id: u256, treasury: ContractAddress);
     fn set_base_uri(ref self: TContractState, base_uri: ByteArray);

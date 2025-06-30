@@ -193,7 +193,8 @@ pub mod PositionManager {
         }
     }
 
-    /// Public interface for ISP functionality
+    // todo: Send this interface to the interface folder
+    // Public interface for ISP functionality
     #[starknet::interface]
     pub trait IPositionManagerISP<TContractState> {
         fn get_pool_fees(self: @TContractState, pool_key: PoolKey) -> ClaimableFees;
@@ -230,3 +231,5 @@ pub mod PositionManager {
         }
     }
 }
+
+// There is no token launching functionality in this contract yet.

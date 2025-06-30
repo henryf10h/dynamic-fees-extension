@@ -221,12 +221,12 @@ mod Memecoin {
 
         // Get treasury - this would need to query the relaunch contract
         // We'll add a placeholder for now
-        fn treasury(self: @ContractState) -> ContractAddress {
-            // In Solidity, this calls relaunch.memecoinTreasury(tokenId)
-            // For now, return zero address
-            // This would need to be updated once you have a relaunch contract
-            get_caller_address() //todo: change this to the treasury address
-        }
+        // fn treasury(self: @ContractState) -> ContractAddress {
+        //     // In Solidity, this calls relaunch.memecoinTreasury(tokenId)
+        //     // For now, return zero address
+        //     // This would need to be updated once you have a relaunch contract
+        //     get_caller_address() //todo: change this to the treasury address
+        // }
     }
 
     impl ERC20HooksImpl of ERC20Component::ERC20HooksTrait<ContractState> {
