@@ -3,6 +3,9 @@ name = "relaunch"
 version = "0.1.0"
 edition = "2024_07"
 
+[[tool.snforge.fork]]
+name = "mainnet"
+url = "https://free-rpc.nethermind.io/mainnet-juno"
 
 [dependencies]
 starknet = ">=2.6.3"
@@ -19,3 +22,6 @@ allowed-libfuncs-list.name = "all"
 casm = true
 sierra = true
 build-external-contracts = ["ekubo::*"]
+
+[dev-dependencies]
+snforge_std = "0.45.0"

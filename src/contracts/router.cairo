@@ -44,16 +44,8 @@ pub mod ISPRouter {
             pool_key: PoolKey,
             params: SwapParameters,
             token_in: ContractAddress,
-            amount_in: u128,
-            
-            
+            amount_in: u128
         ) -> ISPSwapResult;
-
-        fn preview_isp_swap(
-            self: @TContractState,
-            pool_key: PoolKey,
-            params: SwapParameters
-        ) -> (bool, ClaimableFees, u128);
     }
 
     #[abi(embed_v0)]
@@ -92,7 +84,6 @@ pub mod ISPRouter {
         pub user: ContractAddress,
         pub amount_in: u128,
         pub amount_out: u128,
-        pub fee_collected: u128,
     }
 
     #[derive(starknet::Event, Drop)]
@@ -155,14 +146,6 @@ pub mod ISPRouter {
             )
         }
         
-        /// Preview potential ISP prefill with proper price calculation
-        fn preview_isp_swap(
-            self: @ContractState,
-            pool_key: PoolKey,
-            params: SwapParameters
-        ) -> (bool, ClaimableFees, u128) {
-
-        }
     }
 
     #[generate_trait]
@@ -203,16 +186,19 @@ pub mod ISPRouter {
             );
             
             
-            // FIXED: Now we need to withdraw the tokens to the user
-            // The ISP has saved the output tokens for the user, we need to load and withdraw them
-            if isp_result.output_amount > 0 {
-                // Transfer input tokens from caller to router
+            // Handle token transfers at the END (till pattern)
+            if callback_data.amount_in > 0 {
                 let token_in_contract = IERC20Dispatcher { contract_address: callback_data.token_in };
                 let amount_in_u256: u256 = callback_data.amount_in.into();
-                token_in_contract.approve(core.contract_address, amount_in_u256);
-                token_in_contract.transferFrom(callback_data.caller, get_contract_address(), amount_in_u256);
+                token_in_contract.transferFrom(
+                    callback_data.caller, 
+                    get_contract_address(), 
+                    amount_in_u256
+                );
                 core.pay(callback_data.token_in);
-                // Withdraw the tokens to the user
+            }
+            
+            if isp_result.output_amount > 0 {
                 core.withdraw(isp_result.output_token, callback_data.caller, isp_result.output_amount);
             }
             
@@ -222,7 +208,6 @@ pub mod ISPRouter {
                 user: callback_data.caller,
                 amount_in: callback_data.amount_in,
                 amount_out: isp_result.output_amount,
-                fee_collected: isp_result.fee_collected,
             });
             
             // Return the result using serialize helper
