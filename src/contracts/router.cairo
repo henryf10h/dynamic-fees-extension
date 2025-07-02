@@ -36,6 +36,26 @@ pub mod ISPRouter {
         fn get_native_token(self: @TContractState) -> ContractAddress;
     }
 
+    // Interface for ISP Router
+    #[starknet::interface]
+    pub trait IISPRouter<TContractState> {
+        fn swap(
+            ref self: TContractState,
+            pool_key: PoolKey,
+            params: SwapParameters,
+            token_in: ContractAddress,
+            amount_in: u128,
+            
+            
+        ) -> ISPSwapResult;
+
+        fn preview_isp_swap(
+            self: @TContractState,
+            pool_key: PoolKey,
+            params: SwapParameters
+        ) -> (bool, ClaimableFees, u128);
+    }
+
     #[abi(embed_v0)]
     impl Clear = ekubo::components::clear::ClearImpl<ContractState>;
 
@@ -94,26 +114,6 @@ pub mod ISPRouter {
         
     }
 
-    /// Interface for ISP Router
-    #[starknet::interface]
-    pub trait IISPRouter<TContractState> {
-        fn swap(
-            ref self: TContractState,
-            pool_key: PoolKey,
-            params: SwapParameters,
-            token_in: ContractAddress,
-            amount_in: u128,
-            
-            
-        ) -> ISPSwapResult;
-
-        fn preview_isp_swap(
-            self: @TContractState,
-            pool_key: PoolKey,
-            params: SwapParameters
-        ) -> (bool, ClaimableFees, u128);
-    }
-
     #[abi(embed_v0)]
     impl ISPRouterImpl of IISPRouter<ContractState> {
         /// Main swap function - uses lock-forward pattern for ISP
@@ -122,12 +122,8 @@ pub mod ISPRouter {
             pool_key: PoolKey,
             params: SwapParameters,
             token_in: ContractAddress,
-            amount_in: u128,
-            
-            
+            amount_in: u128
         ) -> ISPSwapResult {
-            
-            
             // Verify this is an exact input swap
             assert(!params.amount.sign, 'Only exact input swaps');
             assert(params.amount.mag == amount_in, 'Amount mismatch');
@@ -165,86 +161,7 @@ pub mod ISPRouter {
             pool_key: PoolKey,
             params: SwapParameters
         ) -> (bool, ClaimableFees, u128) {
-            let isp_manager = IPositionManagerISPDispatcher { contract_address: pool_key.extension };
-            let available_fees = IPositionManagerISPDispatcherTrait::get_pool_fees(isp_manager, pool_key);
-            let can_prefill = IPositionManagerISPDispatcherTrait::can_use_prefill(isp_manager, pool_key, params);
-            
-            let potential_prefill_eth = if can_prefill {
-                // Get current pool price AND tick
-                let pool_price = self.core.read().get_pool_price(pool_key);
-                let current_tick = pool_price.tick;
-                let mathlib = mathlib();
-                
-                // Determine which token is native and which fees are available
-                let native_token = IPositionManagerISPDispatcherTrait::get_native_token(isp_manager);
-                let token0_is_native = native_token == pool_key.token0;
-                
-                // If we're swapping ETH for tokens, we need token fees (non-ETH)
-                let available_output_fees = if token0_is_native {
-                    // Native is token0, so we need token1 fees for ETH→Token1 swap
-                    if !params.is_token1 {
-                        available_fees.amount1  // Swapping token0 (ETH) for token1
-                    } else {
-                        0  // Can't prefill Token1→ETH swap
-                    }
-                } else if params.is_token1 {
-                    // Native is token1, so we need token0 fees for ETH→Token0 swap
-                    available_fees.amount0  // Swapping token1 (ETH) for token0
-                } else {
-                    0  // Can't prefill Token0→ETH swap
-                };
-                
-                if available_output_fees > 0 {
-                    // Get price bounds based on tick spacing
-                    let tick_spacing = pool_key.tick_spacing;
-                    
-                    // Align to tick spacing
-                    let aligned_tick = if current_tick.mag % tick_spacing == 0 {
-                        current_tick
-                    } else {
-                        let remainder = current_tick.mag % tick_spacing;
-                        if current_tick.sign {
-                            i129 { mag: current_tick.mag + (tick_spacing - remainder), sign: true }
-                        } else {
-                            i129 { mag: current_tick.mag - remainder, sign: false }
-                        }
-                    };
-                    
-                    // Get sqrt ratios for the range
-                    let sqrt_ratio_lower = mathlib.tick_to_sqrt_ratio(aligned_tick);
-                    let sqrt_ratio_upper = mathlib.tick_to_sqrt_ratio(
-                        aligned_tick + i129 { mag: tick_spacing, sign: false }
-                    );
-                    
-                    // Calculate ETH equivalent using proper price range
-                    let eth_equivalent = if token0_is_native {
-                        // ETH is token0, we have token1 fees
-                        mathlib.amount0_delta(
-                            sqrt_ratio_lower, 
-                            sqrt_ratio_upper,
-                            available_output_fees,
-                            false
-                        )
-                    } else {
-                        // ETH is token1, we have token0 fees
-                        mathlib.amount1_delta(
-                            sqrt_ratio_lower, 
-                            sqrt_ratio_upper,
-                            available_output_fees,
-                            false
-                        )
-                    };
-                    
-                    // Don't prefill more than the swap amount
-                    core::cmp::min(eth_equivalent, params.amount.mag)
-                } else {
-                    0
-                }
-            } else {
-                0
-            };
 
-            (can_prefill, available_fees, potential_prefill_eth)
         }
     }
 
@@ -270,15 +187,6 @@ pub mod ISPRouter {
             // Consume the callback data
             let callback_data = consume_callback_data::<CallbackData>(core, data);
             
-            // Transfer input tokens from caller to router
-            let token_in_contract = IERC20Dispatcher { contract_address: callback_data.token_in };
-            let amount_in_u256: u256 = callback_data.amount_in.into();
-            token_in_contract.transferFrom(callback_data.caller, get_contract_address(), amount_in_u256);
-            
-            // Approve and pay to core
-            token_in_contract.approve(core.contract_address, amount_in_u256);
-            core.pay(callback_data.token_in);
-            
             // Prepare ISP swap data
             let isp_data = ISPSwapData {
                 pool_key: callback_data.pool_key,
@@ -298,13 +206,12 @@ pub mod ISPRouter {
             // FIXED: Now we need to withdraw the tokens to the user
             // The ISP has saved the output tokens for the user, we need to load and withdraw them
             if isp_result.output_amount > 0 {
-                // Load the tokens that ISP saved for the user
-                // let user_salt = InternalImpl::_get_user_withdrawal_salt(
-                //     @self,
-                //     callback_data.caller
-                // );
-                // core.load(isp_result.output_token, user_salt, isp_result.output_amount);
-                
+                // Transfer input tokens from caller to router
+                let token_in_contract = IERC20Dispatcher { contract_address: callback_data.token_in };
+                let amount_in_u256: u256 = callback_data.amount_in.into();
+                token_in_contract.approve(core.contract_address, amount_in_u256);
+                token_in_contract.transferFrom(callback_data.caller, get_contract_address(), amount_in_u256);
+                core.pay(callback_data.token_in);
                 // Withdraw the tokens to the user
                 core.withdraw(isp_result.output_token, callback_data.caller, isp_result.output_amount);
             }

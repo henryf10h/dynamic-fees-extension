@@ -9,7 +9,7 @@ pub mod PositionManager {
     use ekubo::components::upgradeable::{Upgradeable as upgradeable_component, IHasInterface};
     use ekubo::interfaces::core::{
         IExtension, SwapParameters, UpdatePositionParameters, IForwardee, ICoreDispatcher,
-        ICoreDispatcherTrait, ILocker
+        ICoreDispatcherTrait
     };
     use ekubo::types::bounds::{Bounds};
     use ekubo::types::call_points::{CallPoints};
@@ -41,7 +41,12 @@ pub mod PositionManager {
     // ISP Component
     component!(path: isp_component, storage: isp, event: ISPEvent);
     impl ISPImpl = isp_component::ISPImpl<ContractState>;
-    impl ISPInternal = isp_component::InternalImpl<ContractState>;
+
+    // Public interface for ISP functionality
+    #[starknet::interface]
+    pub trait IPositionManagerISP<TContractState> {
+        fn get_native_token(self: @TContractState) -> ContractAddress;
+    }
 
     #[storage]
     struct Storage {
@@ -87,9 +92,7 @@ pub mod PositionManager {
         pub pool_key: PoolKey,
         #[key]
         pub user: ContractAddress,
-        pub prefill_amount: u128,
         pub swap_amount: u128,
-        pub fee_collected: u128,
         pub total_output: u128,
     }
 
@@ -157,21 +160,12 @@ pub mod PositionManager {
                 swap_data.max_fee_amount
             );
             
-            // Calculate total output for event
-            let total_output = if swap_data.params.is_token1 {
-                result.total_delta.amount1.mag
-            } else {
-                result.total_delta.amount0.mag
-            };
-
             // Emit event for tracking
             self.emit(SwapProcessed {
                 pool_key: swap_data.pool_key,
                 user: swap_data.user,
-                prefill_amount: result.prefill_amount,
                 swap_amount: result.swap_amount,
-                fee_collected: result.fee_collected,
-                total_output,
+                total_output: result.output_amount,
             });
 
             // Serialize and return the result
@@ -182,49 +176,20 @@ pub mod PositionManager {
     }
 
     // Locker implementation - not used in normal flow
-    #[abi(embed_v0)]
-    impl LockerImpl of ILocker<ContractState> {
-        fn locked(ref self: ContractState, id: u32, data: Span<felt252>) -> Span<felt252> {
-            // The router is the locker in our architecture
-            // ISP logic happens through forwarded() via the lock-forward pattern
-            let mut empty = array![];
-            assert(false, 'Not a locker - use Router');
-            empty.span()
-        }
-    }
-
-    // todo: Send this interface to the interface folder
-    // Public interface for ISP functionality
-    #[starknet::interface]
-    pub trait IPositionManagerISP<TContractState> {
-        fn get_pool_fees(self: @TContractState, pool_key: PoolKey) -> ClaimableFees;
-        
-        fn can_use_prefill(
-            self: @TContractState,
-            pool_key: PoolKey,
-            params: SwapParameters
-        ) -> bool;
-        
-        fn get_native_token(self: @TContractState) -> ContractAddress;
-    }
+    // #[abi(embed_v0)]
+    // impl LockerImpl of ILocker<ContractState> {
+    //     fn locked(ref self: ContractState, id: u32, data: Span<felt252>) -> Span<felt252> {
+    //         // The router is the locker in our architecture
+    //         // ISP logic happens through forwarded() via the lock-forward pattern
+    //         let mut empty = array![];
+    //         assert(false, 'Not a locker - use Router');
+    //         empty.span()
+    //     }
+    // }
 
     // Public interface for ISP functionality
     #[abi(embed_v0)]
     impl PositionManagerImpl of IPositionManagerISP<ContractState> {
-        /// Get accumulated fees for a pool
-        fn get_pool_fees(self: @ContractState, pool_key: PoolKey) -> ClaimableFees {
-            ISPImpl::get_pool_fees(self, pool_key)
-        }
-
-        /// Check if a swap can use prefill
-        fn can_use_prefill(
-            self: @ContractState,
-            pool_key: PoolKey,
-            params: SwapParameters
-        ) -> bool {
-            ISPImpl::can_use_prefill(self, pool_key, params)
-        }
-
         /// Get native token address
         fn get_native_token(self: @ContractState) -> ContractAddress {
             self.isp.native_token.read()
