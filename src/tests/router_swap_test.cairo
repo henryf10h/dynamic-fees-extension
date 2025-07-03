@@ -1,98 +1,82 @@
-use snforge_std::{declare, spy_events, EventSpyAssertionsTrait};
-use starknet::ContractAddress;
-use core::result::ResultTrait;
+use ekubo::interfaces::core::{ICoreDispatcherTrait, ICoreDispatcher, IExtensionDispatcher};
+use ekubo::interfaces::positions::{IPositionsDispatcher, IPositionsDispatcherTrait};
+use relaunch::interfaces::Irouter::{IISPRouterDispatcher, IISPRouterDispatcherTrait};
+use relaunch::interfaces::Iposition_manager::{
+    IPositionManagerISPDispatcher, IPositionManagerISPDispatcherTrait,
+};
+use relaunch::contracts::test_token::{IERC20Dispatcher, IERC20DispatcherTrait};
+use snforge_std::{
+    declare, DeclareResultTrait, ContractClassTrait, ContractClass, cheat_caller_address,
+    stop_cheat_caller_address, start_cheat_block_timestamp_global, CheatSpan,
+};
+use starknet::{get_block_timestamp, contract_address_const, ContractAddress};
 
-// Define required interfaces locally
-#[starknet::interface]
-trait IERC20<TContractState> {
-    fn mint(ref self: TContractState, recipient: ContractAddress, amount: u128);
-    fn approve(ref self: TContractState, spender: ContractAddress, amount: u128);
-    fn balance_of(self: @TContractState, account: ContractAddress) -> u128;
+// I need a router dispatcher 
+// I need a erc20 dispatcher
+// I need ekubo core dispatcher
+// I need a position manager dispatcher
+
+// deploy token, core, positions, router
+// router needs owner, core and native_token and returns IISRouterDispatcher
+
+// deploy position manager contract as an extension and as a periphery (isp interface)
+// position manager needs owner, core, native_token and returns IPositionsDispatcher
+
+fn deploy_token(
+    class: @ContractClass, recipient: ContractAddress, amount: u256
+) -> IERC20Dispatcher {
+    let (contract_address, _) = class
+        .deploy(@array![recipient.into(), amount.low.into(), amount.high.into()])
+        .expect('Deploy token failed');
+
+    IERC20Dispatcher { contract_address }
 }
 
-#[starknet::interface]
-trait IISP<TContractState> {
-    fn swap(
-        ref self: TContractState,
-        pool_key: PoolKey,
-        params: SwapParameters,
-        token_in: ContractAddress,
-        amount_in: u128
-    );
+fn deploy_router(
+    class: @ContractClass, owner: ContractAddress, core: ICoreDispatcher,
+    native_token: ContractAddress
+) -> IISPRouterDispatcher {
+    let (contract_address, _) = class
+        .deploy(@array![owner.into(), core.contract_address.into(), native_token.into()])
+        .expect('Deploy router failed');
+
+    IISPRouterDispatcher { contract_address }
 }
 
-#[derive(Drop, Serde)]
-struct PoolKey {
-    token0: ContractAddress,
-    token1: ContractAddress,
-    extension: ContractAddress,
+fn deploy_position_manager_extension(
+    class: @ContractClass, owner: ContractAddress, core: ICoreDispatcher,
+    native_token: ContractAddress
+) -> IExtensionDispatcher {
+    let (contract_address, _) = class
+        .deploy(@array![owner.into(), core.contract_address.into(), native_token.into()])
+        .expect('Deploy position manager failed');
+
+    IExtensionDispatcher { contract_address }
+}
+// todo: pass the isp interface here as a dispatcher
+fn deploy_position_manager_periphery(
+    class: @ContractClass, owner: ContractAddress, core: ICoreDispatcher,
+    native_token: ContractAddress
+) -> IPositionsDispatcher {
+    let (contract_address, _) = class
+        .deploy(@array![owner.into(), core.contract_address.into(), native_token.into()])
+        .expect('Deploy periphery failed');
+
+    IPositionsDispatcher { contract_address }
 }
 
-#[derive(Drop, Serde)]
-struct SwapParameters {
-    amount: i129,
-    is_token1: bool,
-    sqrt_price_limit: u128,
+fn ekubo_core() -> ICoreDispatcher {
+    ICoreDispatcher {
+        contract_address: contract_address_const::<
+            0x00000005dd3D2F4429AF886cD1a3b08289DBcEa99A294197E9eB43b0e0325b4b
+        >()
+    }
 }
 
-#[derive(Drop, Serde)]
-struct i129 {
-    mag: u128,
-    sign: bool,
-}
-
-#[test]
-fn test_router_swap() {
-    // Deploy tokens
-    let token_a_class = declare("ERC20_Token").unwrap().contract_class();
-    let (token_a, _) = token_a_class.deploy(@array![]).unwrap();
-    
-    let token_b_class = declare("ERC20_Token").unwrap().contract_class();
-    let (token_b, _) = token_b_class.deploy(@array![]).unwrap();
-
-    // Deploy core (mock)
-    let core_class = declare("EkuboCore_Mock").unwrap().contract_class();
-    let (core, _) = core_class.deploy(@array![]).unwrap();
-
-    // Deploy position manager
-    let pm_class = declare("PositionManager").unwrap().contract_class();
-    let (position_manager, _) = pm_class.deploy(@array![core.into(), token_a.into()]).unwrap();
-
-    // Deploy router
-    let router_class = declare("ISPRouter").unwrap().contract_class();
-    let (router, _) = router_class.deploy(@array![core.into(), token_a.into()]).unwrap();
-
-    // Initialize pool
-    let pool_key = PoolKey {
-        token0: token_a,
-        token1: token_b,
-        extension: position_manager,
-    };
-
-    // Setup test user
-    let user: ContractAddress = 12345.try_into().unwrap();
-
-    // Mint tokens and approve router
-    IERC20Dispatcher { contract_address: token_a }.mint(user, 1000);
-    IERC20Dispatcher { contract_address: token_a }.approve(router, 1000);
-
-    // Prepare swap parameters
-    let swap_params = SwapParameters {
-        amount: i129 { mag: 100, sign: false },
-        is_token1: false,
-        sqrt_price_limit: 0,
-    };
-
-    // Execute swap
-    let mut event_spy = spy_events();
-    IISPDispatcher { contract_address: router }.swap(
-        pool_key,
-        swap_params,
-        token_a,
-        100
-    );
-
-    // Verify tokenB balance increased
-    let balance = IERC20Dispatcher { contract_address: token_b }.balance_of(user);
-    assert(balance > 0, "No output tokens received");
+fn positions() -> IPositionsDispatcher {
+    IPositionsDispatcher {
+        contract_address: contract_address_const::<
+            0x02e0af29598b407c8716b17f6d2795eca1b471413fa03fb145a5e33722184067
+        >()
+    }
 }

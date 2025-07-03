@@ -23,6 +23,7 @@ pub mod PositionManager {
     // use ekubo::interfaces::mathlib::{IMathLibDispatcher};
 
     // Import our ISP component
+    use relaunch::interfaces::Iposition_manager::{IPositionManagerISP, IPositionManagerISPDispatcher};
     use relaunch::contracts::internal_swap_pool::{isp_component};
     use relaunch::contracts::internal_swap_pool::{ClaimableFees, ISPSwapData};
 
@@ -41,12 +42,6 @@ pub mod PositionManager {
     // ISP Component
     component!(path: isp_component, storage: isp, event: ISPEvent);
     impl ISPImpl = isp_component::ISPImpl<ContractState>;
-
-    // Public interface for ISP functionality
-    #[starknet::interface]
-    pub trait IPositionManagerISP<TContractState> {
-        fn get_native_token(self: @TContractState) -> ContractAddress;
-    }
 
     #[storage]
     struct Storage {

@@ -17,36 +17,9 @@ pub mod ISPRouter {
     use ekubo::interfaces::erc20::{IERC20Dispatcher, IERC20DispatcherTrait};
     use ekubo::types::keys::{PoolKey};
     use starknet::{get_contract_address, get_caller_address, ContractAddress};
-    use starknet::storage::{
-        StoragePointerWriteAccess,
-        StoragePointerReadAccess};
-
-    // Import ISP types
+    use starknet::storage::{StoragePointerWriteAccess, StoragePointerReadAccess};
     use relaunch::contracts::internal_swap_pool::{ISPSwapData, ISPSwapResult, ClaimableFees};
-    
-    // Position manager interface
-    #[starknet::interface]
-    pub trait IPositionManagerISP<TContractState> {
-        fn get_pool_fees(self: @TContractState, pool_key: PoolKey) -> ClaimableFees;
-        fn can_use_prefill(
-            self: @TContractState,
-            pool_key: PoolKey,
-            params: SwapParameters
-        ) -> bool;
-        fn get_native_token(self: @TContractState) -> ContractAddress;
-    }
-
-    // Interface for ISP Router
-    #[starknet::interface]
-    pub trait IISPRouter<TContractState> {
-        fn swap(
-            ref self: TContractState,
-            pool_key: PoolKey,
-            params: SwapParameters,
-            token_in: ContractAddress,
-            amount_in: u128
-        ) -> ISPSwapResult;
-    }
+    use relaunch::interfaces::Irouter::{IISPRouter};
 
     #[abi(embed_v0)]
     impl Clear = ekubo::components::clear::ClearImpl<ContractState>;

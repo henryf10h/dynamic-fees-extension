@@ -30,41 +30,12 @@ pub struct ISPSwapResult {
     pub output_token: ContractAddress, // Token to send to user
     pub swap_amount: u128,            // Amount swapped through core
 }
-#[starknet::interface]
-pub trait IISP<TState> {
-    fn initialize(
-        ref self: TState,
-        native_token: ContractAddress,
-        core: ICoreDispatcher,
-        fee_percentage: u128
-    );
-    fn get_pool_fees(self: @TState, pool_key: PoolKey) -> ClaimableFees;
-    fn can_use_prefill(
-        self: @TState,
-        pool_key: PoolKey,
-        params: SwapParameters
-    ) -> bool;
-    fn execute_isp_swap(
-        ref self: TState,
-        pool_key: PoolKey,
-        params: SwapParameters,
-        user: ContractAddress,
-        max_fee_amount: u128
-    ) -> ISPSwapResult;
-    fn accumulate_fees(
-        ref self: TState,
-        pool_key: PoolKey,
-        token: ContractAddress,
-        amount: u128
-    );
-}
-
 // ISP TODO:
 // 1. New logic to get amounts from prices in V2 style
 // 2. Get fees at the end of lock-forward pattern 
 #[starknet::component]
 pub mod isp_component {
-    use super::{ClaimableFees, ISPSwapResult, IISP};
+    use super::{ClaimableFees, ISPSwapResult};
     use ekubo::interfaces::core::{ICoreDispatcher, ICoreDispatcherTrait, SwapParameters};
     use ekubo::interfaces::mathlib::{
         IMathLibLibraryDispatcher, IMathLibDispatcherTrait, dispatcher as mathlib
@@ -74,6 +45,7 @@ pub mod isp_component {
     use ekubo::types::keys::{PoolKey, SavedBalanceKey};
     use starknet::{ContractAddress, get_contract_address};
     use starknet::storage::{Map, StoragePointerWriteAccess, StorageMapWriteAccess, StorageMapReadAccess, StoragePointerReadAccess};
+    use relaunch::interfaces::Iisp::{IISP};
 
     #[storage]
     pub struct Storage {

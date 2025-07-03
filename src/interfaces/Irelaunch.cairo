@@ -22,17 +22,6 @@ pub trait IRelaunch<TContractState> {
         treasury: ContractAddress
     ) -> (ContractAddress, u256);
     
-    // Position Manager functions
-//     fn create_memecoin_from_position_manager(
-//         ref self: TContractState,
-//         creator: ContractAddress,
-//         name: ByteArray,
-//         symbol: ByteArray,
-//         token_uri: ByteArray,
-//         initial_supply: u256,
-//         treasury: ContractAddress
-//     ) -> (ContractAddress, u256);
-    
     // Admin functions
     fn set_meme_classhash(ref self: TContractState, meme_classhash: ClassHash);
     fn set_position_manager(ref self: TContractState, position_manager: ContractAddress);
