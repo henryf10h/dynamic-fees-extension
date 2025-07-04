@@ -118,12 +118,7 @@ pub mod PositionManager {
         fn before_initialize_pool(ref self: ContractState, caller: ContractAddress, pool_key: PoolKey, initial_tick: i129) {}
         fn after_initialize_pool(ref self: ContractState, caller: ContractAddress, pool_key: PoolKey, initial_tick: i129) {}
         fn before_swap(ref self: ContractState, caller: ContractAddress, pool_key: PoolKey, params: SwapParameters) {
-            // Allow swaps only from this contract (ISP component calling swap)
-            // Block all external direct swaps - they must go through ISP
-            // This is a security measure to prevent direct swaps
-            // from bypassing the ISP logic
-            let contract_address = get_contract_address();
-            assert(caller == contract_address, 'Only Position_manager for swaps');
+            panic!("Only from position_manager");
         }
         fn after_swap(ref self: ContractState, caller: ContractAddress, pool_key: PoolKey, params: SwapParameters, delta: Delta) {}
         fn before_update_position(ref self: ContractState, caller: ContractAddress, pool_key: PoolKey, params: UpdatePositionParameters) {}

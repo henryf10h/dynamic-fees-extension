@@ -25,3 +25,8 @@ build-external-contracts = ["ekubo::*"]
 
 [dev-dependencies]
 snforge_std = "0.45.0"
+
+[[tool.snforge.fork]]
+name = "mainnet"
+url = "https://starknet-mainnet.public.blastapi.io/rpc/v0_8"
+block_id.tag = "latest"
