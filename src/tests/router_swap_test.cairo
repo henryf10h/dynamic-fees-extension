@@ -135,7 +135,10 @@ fn setup() -> (PoolKey, IISPDispatcher) {
     
     (pool_key, position_manager_periphery)
 }
-
+// todo: solve issue "Identifier not found"
 #[test]
 #[fork("mainnet")]
-fn test_isp_router_swap() {}
+fn test_isp_router_swap() {
+    let (pool_key, _) = setup();
+    ekubo_core().initialize_pool(pool_key, Zero::zero());
+}
