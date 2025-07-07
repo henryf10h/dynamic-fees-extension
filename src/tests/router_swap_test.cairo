@@ -1,6 +1,9 @@
-use ekubo::interfaces::core::{ICoreDispatcherTrait, ICoreDispatcher, IExtensionDispatcher};
+use ekubo::interfaces::core::{ICoreDispatcherTrait, ICoreDispatcher, IExtensionDispatcher, SwapParameters};
 use ekubo::interfaces::positions::{IPositionsDispatcher, IPositionsDispatcherTrait};
 use ekubo::types::keys::{PoolKey};
+use ekubo::types::bounds::{Bounds};
+use ekubo::types::i129::{i129};
+use core::num::traits::{Zero};
 use relaunch::interfaces::Irouter::{IISPRouterDispatcher, IISPRouterDispatcherTrait};
 use relaunch::interfaces::Iisp::{IISPDispatcher, IISPDispatcherTrait};
 use relaunch::contracts::test_token::{IERC20Dispatcher, IERC20DispatcherTrait};
@@ -9,20 +12,6 @@ use snforge_std::{
     stop_cheat_caller_address, start_cheat_block_timestamp_global, CheatSpan,
 };
 use starknet::{get_block_timestamp, contract_address_const, ContractAddress, get_contract_address};
-
-// I need a router dispatcher 
-// I need a erc20 dispatcher
-// I need ekubo core dispatcher
-// I need a position manager dispatcher
-
-// deploy token, core, positions, router
-// router needs owner, core and native_token and returns IISRouterDispatcher
-
-// deploy position manager contract as an extension and as a periphery (isp interface)
-// position manager needs owner, core, native_token and returns IISPDispatcher
-
-// define a setup function
-// define a swap test using the isp's router
 
 fn deploy_token(
     class: @ContractClass, recipient: ContractAddress, amount: u256
@@ -128,17 +117,64 @@ fn setup() -> (PoolKey, IISPDispatcher) {
     let pool_key = PoolKey {
         token0: tokenA,
         token1: tokenB,
-        fee: 0x68db8bac710cb4000000000000000, // 0.01% fee
-        tick_spacing: 999, // Tick spacing
+        fee: 3402823669209384705469243317362360320, // 1% fee
+        tick_spacing: 999, // Tick spacing, tick spacing percentage 0.1%
         extension: position_manager_extension.contract_address
     };
     
     (pool_key, position_manager_periphery)
 }
-// todo: solve issue "Identifier not found"
+
 #[test]
 #[fork("mainnet")]
 fn test_isp_router_swap() {
     let (pool_key, _) = setup();
     ekubo_core().initialize_pool(pool_key, Zero::zero());
+    
+    // Transfer tokens and mint position (your existing code)
+    IERC20Dispatcher{ contract_address: pool_key.token0 }
+        .transfer(positions().contract_address, 1_000_000);
+    IERC20Dispatcher{ contract_address: pool_key.token1 }
+        .transfer(positions().contract_address, 1_000_000);
+    positions().mint_and_deposit_and_clear_both(
+        pool_key,
+        Bounds {
+            lower: i129 { mag: 2302695, sign: true },
+            upper: i129 { mag: 2302695, sign: false }
+        },
+        0
+    );
+    
+    // Deploy the router
+    let router_class = declare("ISPRouter").unwrap().contract_class();
+    let router = deploy_router(
+        router_class, 
+        get_contract_address(), 
+        ekubo_core(),
+        pool_key.token0
+    );
+    
+    // Prepare swap parameters
+    let amount_in: u128 = 100_000;
+    let swap_params = SwapParameters {
+        amount: i129 { mag: amount_in, sign: false }, // Exact input (positive)
+        is_token1: false, // Swapping token0 -> token1
+        sqrt_ratio_limit: 0, // No price limit
+        skip_ahead: 0, // No skip ahead
+    };
+    
+    // Approve router to spend tokens
+    IERC20Dispatcher{ contract_address: pool_key.token0 }
+        .approve(router.contract_address, amount_in.into());
+    
+    // Execute the swap
+    let result = router.swap(
+        pool_key,
+        swap_params,
+        pool_key.token0, // token_in
+        amount_in
+    );
+    
+    // You can now test the result
+    assert!(result.output_amount > 0, "Swap should produce output");
 }

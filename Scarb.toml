@@ -3,10 +3,6 @@ name = "relaunch"
 version = "0.1.0"
 edition = "2024_07"
 
-[[tool.snforge.fork]]
-name = "mainnet"
-url = "https://free-rpc.nethermind.io/mainnet-juno"
-
 [dependencies]
 starknet = ">=2.6.3"
 openzeppelin = { git = "https://github.com/OpenZeppelin/cairo-contracts", tag = "v2.0.0-alpha.1" }
@@ -30,3 +26,6 @@ snforge_std = "0.45.0"
 name = "mainnet"
 url = "https://starknet-mainnet.public.blastapi.io/rpc/v0_8"
 block_id.tag = "latest"
+
+[scripts]
+test = "snforge test"
