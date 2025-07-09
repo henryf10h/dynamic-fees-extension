@@ -49,6 +49,28 @@ pub mod ISPRouter {
         self.native_token.write(native_token);
     }
 
+    // Route of the swap
+    #[derive(Serde, Copy, Drop)]
+    pub struct RouteNode {
+        pub pool_key: PoolKey,
+        pub sqrt_ratio_limit: u256,
+        pub skip_ahead: u128,
+    }
+
+    // Amount of token to swap and its address
+    #[derive(Serde, Copy, Drop)]
+    pub struct TokenAmount {
+        pub token: ContractAddress,
+        pub amount: i129,
+    }
+
+    // Swap argument for multi multi-hop swaps
+    #[derive(Serde, Drop)]
+    pub struct Swap {
+        pub route: Array<RouteNode>,
+        pub token_amount: TokenAmount,
+    }
+
     #[derive(Drop, starknet::Event)]
     pub struct SwapExecuted {
         #[key]

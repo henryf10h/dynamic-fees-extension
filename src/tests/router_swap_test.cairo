@@ -3,6 +3,7 @@ use ekubo::interfaces::positions::{IPositionsDispatcher, IPositionsDispatcherTra
 use ekubo::types::keys::{PoolKey};
 use ekubo::types::bounds::{Bounds};
 use ekubo::types::i129::{i129};
+use ekubo::interfaces::mathlib::{IMathLibDispatcherTrait, dispatcher as mathlib};
 use core::num::traits::{Zero};
 use relaunch::interfaces::Irouter::{IISPRouterDispatcher, IISPRouterDispatcherTrait};
 use relaunch::interfaces::Iisp::{IISPDispatcher, IISPDispatcherTrait};
@@ -155,12 +156,13 @@ fn test_isp_router_swap() {
     );
     
     // Prepare swap parameters
-    let amount_in: u128 = 100_000;
+    let amount_in: u128 = 100_00;
     let swap_params = SwapParameters {
         amount: i129 { mag: amount_in, sign: false }, // Exact input (positive)
         is_token1: false, // Swapping token0 -> token1
         sqrt_ratio_limit: 0, // No price limit
         skip_ahead: 0, // No skip ahead
+        
     };
     
     // Approve router to spend tokens
@@ -178,3 +180,7 @@ fn test_isp_router_swap() {
     // You can now test the result
     assert!(result.output_amount > 0, "Swap should produce output");
 }
+
+//todo: need to add mathlib from ekubo to do tick->sqrt_ratio conversion
+//todo: need to check how swap parameters are being passed 
+//understand the shared_locker functions
