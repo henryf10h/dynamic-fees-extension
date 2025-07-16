@@ -1,2 +1,6 @@
 target
 .env
+.snfoundry_cache
+.vscode
+.github
+

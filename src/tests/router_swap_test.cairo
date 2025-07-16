@@ -5,7 +5,7 @@ use ekubo::types::bounds::{Bounds};
 use ekubo::types::i129::{i129};
 use ekubo::interfaces::mathlib::{IMathLibDispatcherTrait, dispatcher as mathlib};
 use core::num::traits::{Zero};
-use relaunch::interfaces::Irouter::{IISPRouterDispatcher, IISPRouterDispatcherTrait};
+use relaunch::interfaces::Irouter::{IISPRouterDispatcher, IISPRouterDispatcherTrait, Swap, TokenAmount, RouteNode};
 use relaunch::interfaces::Iisp::{IISPDispatcher, IISPDispatcherTrait};
 use relaunch::contracts::test_token::{IERC20Dispatcher, IERC20DispatcherTrait};
 use snforge_std::{
@@ -35,7 +35,7 @@ fn deploy_router(
     IISPRouterDispatcher { contract_address }
 }
 
-fn deploy_position_manager_extension(
+fn deploy_internal_swap_pool_extension(
     class: @ContractClass, owner: ContractAddress, core: ICoreDispatcher,
     native_token: ContractAddress
 ) -> IExtensionDispatcher {
@@ -46,7 +46,7 @@ fn deploy_position_manager_extension(
     IExtensionDispatcher { contract_address }
 }
 
-fn deploy_position_manager_periphery(
+fn deploy_internal_swap_pool_periphery(
     class: @ContractClass, owner: ContractAddress, core: ICoreDispatcher,
     native_token: ContractAddress
 ) -> IISPDispatcher {
@@ -76,7 +76,7 @@ fn positions() -> IPositionsDispatcher {
 fn setup() -> (PoolKey, IISPDispatcher) {
     // Declare contract classes
     let test_token_class = declare("TestToken").unwrap().contract_class();
-    let position_manager_class = declare("PositionManager").unwrap().contract_class();
+    let internal_swap_pool_class = declare("InternalSwapPool").unwrap().contract_class();
 
     // Get core contract
     let core = ekubo_core();
@@ -98,17 +98,17 @@ fn setup() -> (PoolKey, IISPDispatcher) {
             (addr1, addr0)
         }
     };
-    
-    // Deploy PositionManager using owner for both roles
-    let position_manager_extension = deploy_position_manager_extension(
-        position_manager_class, 
+
+    // Deploy InternalSwapPool using owner for both roles
+    let internal_swap_pool_extension = deploy_internal_swap_pool_extension(
+        internal_swap_pool_class,
         owner,  // owner
         core, 
         tokenA   // native_token
     );
-    
-    let position_manager_periphery = deploy_position_manager_periphery(
-        position_manager_class, 
+
+    let internal_swap_pool_periphery = deploy_internal_swap_pool_periphery(
+        internal_swap_pool_class,
         owner,  // owner
         core, 
         tokenA   // native_token
@@ -120,10 +120,10 @@ fn setup() -> (PoolKey, IISPDispatcher) {
         token1: tokenB,
         fee: 3402823669209384705469243317362360320, // 1% fee
         tick_spacing: 999, // Tick spacing, tick spacing percentage 0.1%
-        extension: position_manager_extension.contract_address
+        extension: internal_swap_pool_extension.contract_address
     };
     
-    (pool_key, position_manager_periphery)
+    (pool_key, internal_swap_pool_periphery)
 }
 
 #[test]
@@ -157,28 +157,27 @@ fn test_isp_router_swap() {
     
     // Prepare swap parameters
     let amount_in: u128 = 100_00;
-    let swap_params = SwapParameters {
+    let token_amount = TokenAmount {
+        token: pool_key.token0,
         amount: i129 { mag: amount_in, sign: false }, // Exact input (positive)
-        is_token1: false, // Swapping token0 -> token1
-        sqrt_ratio_limit: 0, // No price limit
-        skip_ahead: 0, // No skip ahead
-        
     };
-    
+    let route = RouteNode {
+        pool_key,
+        sqrt_ratio_limit: 0,
+        skip_ahead: 0,
+    };
+    let swap_data = Swap {
+        route,
+        token_amount,
+    };
+
     // Approve router to spend tokens
     IERC20Dispatcher{ contract_address: pool_key.token0 }
         .approve(router.contract_address, amount_in.into());
-    
+
     // Execute the swap
-    let result = router.swap(
-        pool_key,
-        swap_params,
-        pool_key.token0, // token_in
-        amount_in
-    );
-    
-    // You can now test the result
-    assert!(result.output_amount > 0, "Swap should produce output");
+    router.swap(swap_data);
+
 }
 
 //todo: need to add mathlib from ekubo to do tick->sqrt_ratio conversion

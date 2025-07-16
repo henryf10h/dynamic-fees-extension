@@ -10,6 +10,7 @@ pub mod ISPRouter {
     };
     use ekubo::components::util::{serialize};
     use ekubo::types::i129::{i129};
+    use ekubo::types::delta::{Delta};
     use ekubo::interfaces::core::{
         ICoreDispatcher, ICoreDispatcherTrait, SwapParameters, IForwardeeDispatcher, ILocker
     };
@@ -18,8 +19,8 @@ pub mod ISPRouter {
     use ekubo::types::keys::{PoolKey};
     use starknet::{get_contract_address, get_caller_address, ContractAddress};
     use starknet::storage::{StoragePointerWriteAccess, StoragePointerReadAccess};
-    use relaunch::contracts::internal_swap_pool::{ISPSwapData, ISPSwapResult, ClaimableFees};
     use relaunch::interfaces::Irouter::{IISPRouter};
+    use relaunch::interfaces::Irouter::{Swap};
 
     #[abi(embed_v0)]
     impl Clear = ekubo::components::clear::ClearImpl<ContractState>;
@@ -47,28 +48,6 @@ pub mod ISPRouter {
         self.initialize_owned(owner);
         self.core.write(core);
         self.native_token.write(native_token);
-    }
-
-    // Route of the swap
-    #[derive(Serde, Copy, Drop)]
-    pub struct RouteNode {
-        pub pool_key: PoolKey,
-        pub sqrt_ratio_limit: u256,
-        pub skip_ahead: u128,
-    }
-
-    // Amount of token to swap and its address
-    #[derive(Serde, Copy, Drop)]
-    pub struct TokenAmount {
-        pub token: ContractAddress,
-        pub amount: i129,
-    }
-
-    // Swap argument for multi multi-hop swaps
-    #[derive(Serde, Drop)]
-    pub struct Swap {
-        pub route: Array<RouteNode>,
-        pub token_amount: TokenAmount,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -103,42 +82,9 @@ pub mod ISPRouter {
     #[abi(embed_v0)]
     impl ISPRouterImpl of IISPRouter<ContractState> {
         /// Main swap function - uses lock-forward pattern for ISP
-        fn swap(
-            ref self: ContractState,
-            pool_key: PoolKey,
-            params: SwapParameters,
-            token_in: ContractAddress,
-            amount_in: u128
-        ) -> ISPSwapResult {
-            // Verify this is an exact input swap
-            assert(!params.amount.sign, 'Only exact input swaps');
-            assert(params.amount.mag == amount_in, 'Amount mismatch');
-            
-            // Verify token_in matches the swap direction
-            let is_token0_to_token1 = !params.is_token1;
-            if is_token0_to_token1 {
-                assert(token_in == pool_key.token0, 'Token mismatch');
-            } else {
-                assert(token_in == pool_key.token1, 'Token mismatch');
-            }
-
-            let caller = get_caller_address();
-            
-            // Prepare callback data
-            let callback_data = CallbackData {
-                caller,
-                pool_key,
-                params,
-                token_in,
-                amount_in,
-                
-            };
-            
+        fn swap( ref self: ContractState, swap_data: Swap) -> Delta {
             // Use the helper to call core.lock with our callback
-            call_core_with_callback::<CallbackData, ISPSwapResult>(
-                self.core.read(),
-                @callback_data
-            )
+            call_core_with_callback( self.core.read(), @swap_data )
         }
         
     }
@@ -163,50 +109,26 @@ pub mod ISPRouter {
             let core = self.core.read();
             
             // Consume the callback data
-            let callback_data = consume_callback_data::<CallbackData>(core, data);
+            let swap_data : Swap = consume_callback_data(core, data);
             
-            // Prepare ISP swap data
-            let isp_data = ISPSwapData {
-                pool_key: callback_data.pool_key,
-                params: callback_data.params,
-                user: callback_data.caller,
-                max_fee_amount: 0, // Not used for exact input swaps
-            };
-            
-            // Forward to ISP extension and get result
-            let isp_result: ISPSwapResult = forward_lock(
+            // Forward to InternalSwapPool extension and get result
+            let isp_delta: Delta = forward_lock(
                 core,
-                IForwardeeDispatcher { contract_address: callback_data.pool_key.extension },
-                @isp_data
+                IForwardeeDispatcher { contract_address: swap_data.route.pool_key.extension },
+                @swap_data
             );
-            
-            
-            // Handle token transfers at the END (till pattern)
-            if callback_data.amount_in > 0 {
-                let token_in_contract = IERC20Dispatcher { contract_address: callback_data.token_in };
-                let amount_in_u256: u256 = callback_data.amount_in.into();
-                token_in_contract.transferFrom(
-                    callback_data.caller, 
-                    get_contract_address(), 
-                    amount_in_u256
-                );
-                core.pay(callback_data.token_in);
-            }
-            
-            if isp_result.output_amount > 0 {
-                core.withdraw(isp_result.output_token, callback_data.caller, isp_result.output_amount);
-            }
-            
-            // Emit event
-            self.emit(SwapExecuted {
-                pool_key: callback_data.pool_key,
-                user: callback_data.caller,
-                amount_in: callback_data.amount_in,
-                amount_out: isp_result.output_amount,
-            });
+
+            let recipient = get_contract_address();
+
+            // To take a negative delta out of core, do (assuming token0 for token1):
+            core.withdraw(swap_data.route.pool_key.token1, recipient, isp_delta.amount1.mag.into());
+            // To pay tokens you owe, do (assuming payment is for token0):
+            let token = IERC20Dispatcher { contract_address: swap_data.route.pool_key.token0 };
+            token.approve(core.contract_address, isp_delta.amount0.mag.into());
+            core.pay(token.contract_address);
             
             // Return the result using serialize helper
-            serialize(@isp_result).span()
+            serialize(@isp_delta).span()
         }
     }
 }
