@@ -35,26 +35,15 @@ fn deploy_router(
     IISPRouterDispatcher { contract_address }
 }
 
-fn deploy_internal_swap_pool_extension(
+fn deploy_internal_swap_pool(
     class: @ContractClass, owner: ContractAddress, core: ICoreDispatcher,
     native_token: ContractAddress
-) -> IExtensionDispatcher {
+) -> (IExtensionDispatcher, IISPDispatcher) {
     let (contract_address, _) = class
         .deploy(@array![owner.into(), core.contract_address.into(), native_token.into()])
-        .expect('Deploy position manager failed');
+        .expect('Deploy InternalSwapPool failed');
 
-    IExtensionDispatcher { contract_address }
-}
-
-fn deploy_internal_swap_pool_periphery(
-    class: @ContractClass, owner: ContractAddress, core: ICoreDispatcher,
-    native_token: ContractAddress
-) -> IISPDispatcher {
-    let (contract_address, _) = class
-        .deploy(@array![owner.into(), core.contract_address.into(), native_token.into()])
-        .expect('Deploy periphery failed');
-
-    IISPDispatcher { contract_address }
+    (IExtensionDispatcher { contract_address }, IISPDispatcher { contract_address })
 }
 
 fn ekubo_core() -> ICoreDispatcher {
@@ -99,21 +88,14 @@ fn setup() -> (PoolKey, IISPDispatcher) {
         }
     };
 
-    // Deploy InternalSwapPool using owner for both roles
-    let internal_swap_pool_extension = deploy_internal_swap_pool_extension(
+    // Deploy InternalSwapPool once and get both interfaces
+    let (internal_swap_pool_extension, internal_swap_pool_periphery) = deploy_internal_swap_pool(
         internal_swap_pool_class,
         owner,  // owner
         core, 
         tokenA   // native_token
     );
 
-    let internal_swap_pool_periphery = deploy_internal_swap_pool_periphery(
-        internal_swap_pool_class,
-        owner,  // owner
-        core, 
-        tokenA   // native_token
-    );
-    
     // Create PoolKey
     let pool_key = PoolKey {
         token0: tokenA,
@@ -122,8 +104,18 @@ fn setup() -> (PoolKey, IISPDispatcher) {
         tick_spacing: 999, // Tick spacing, tick spacing percentage 0.1%
         extension: internal_swap_pool_extension.contract_address
     };
-    
+
     (pool_key, internal_swap_pool_periphery)
+}
+
+// Helper for u256 muldiv
+fn u256_muldiv(x: u256, num: u128, denom: u128) -> u256 {
+    // (x * num) / denom
+    let x_lo = x.low * num;
+    let x_hi = x.high * num;
+    let result_lo = x_lo / denom;
+    let result_hi = x_hi / denom;
+    u256 { low: result_lo, high: result_hi }
 }
 
 #[test]
@@ -161,9 +153,21 @@ fn test_isp_router_swap() {
         token: pool_key.token0,
         amount: i129 { mag: amount_in, sign: false }, // Exact input (positive)
     };
+
+    // Get current pool price
+    let pool_price = ekubo_core().get_pool_price(pool_key);
+    let current_sqrt_price = pool_price.sqrt_ratio;
+
+    // Determine trade direction
+    let is_token1 = pool_key.token1 == token_amount.token;
+    // 5% slippage
+    let slippage_numerator = if is_token1 { 95 } else { 105 };
+    let slippage_denominator = 100;
+    let sqrt_ratio_limit = u256_muldiv(current_sqrt_price, slippage_numerator, slippage_denominator);
+
     let route = RouteNode {
         pool_key,
-        sqrt_ratio_limit: 0,
+        sqrt_ratio_limit,
         skip_ahead: 0,
     };
     let swap_data = Swap {
@@ -179,7 +183,3 @@ fn test_isp_router_swap() {
     router.swap(swap_data);
 
 }
-
-//todo: need to add mathlib from ekubo to do tick->sqrt_ratio conversion
-//todo: need to check how swap parameters are being passed 
-//understand the shared_locker functions
