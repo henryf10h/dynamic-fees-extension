@@ -108,16 +108,6 @@ fn setup() -> (PoolKey, IISPDispatcher) {
     (pool_key, internal_swap_pool_periphery)
 }
 
-// Helper for u256 muldiv
-fn u256_muldiv(x: u256, num: u128, denom: u128) -> u256 {
-    // (x * num) / denom
-    let x_lo = x.low * num;
-    let x_hi = x.high * num;
-    let result_lo = x_lo / denom;
-    let result_hi = x_hi / denom;
-    u256 { low: result_lo, high: result_hi }
-}
-
 #[test]
 #[fork("mainnet")]
 fn test_isp_router_swap() {
@@ -157,13 +147,16 @@ fn test_isp_router_swap() {
     // Get current pool price
     let pool_price = ekubo_core().get_pool_price(pool_key);
     let current_sqrt_price = pool_price.sqrt_ratio;
+    println!("Current sqrt price: {}", current_sqrt_price);
 
     // Determine trade direction
-    let is_token1 = pool_key.token1 == token_amount.token;
-    // 5% slippage
-    let slippage_numerator = if is_token1 { 95 } else { 105 };
-    let slippage_denominator = 100;
-    let sqrt_ratio_limit = u256_muldiv(current_sqrt_price, slippage_numerator, slippage_denominator);
+    let _is_token1 = pool_key.token1 == token_amount.token;
+    // -5% 323268248574891540290205877060179800883 'INSUFFICIENT_TF_BALANCE'
+    // 0% 340282366920938463463374607431768211456 Success
+    // 5% 357296485266985386636543337803356622028 'LIMIT_DIRECTION'
+    // 20% 408338840305126156156049528918121853747 'LIMIT_DIRECTION' 
+    let sqrt_ratio_limit : u256 = 340282366920938463463374607431768211456;
+    println!("Sqrt price limit: {}", sqrt_ratio_limit);
 
     let route = RouteNode {
         pool_key,
