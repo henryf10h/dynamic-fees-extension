@@ -6,7 +6,7 @@ pub mod ISPRouter {
     use ekubo::components::clear::{ClearImpl};
     use ekubo::components::owned::{Owned as owned_component};
     use ekubo::components::shared_locker::{
-        call_core_with_callback, consume_callback_data, forward_lock
+        call_core_with_callback, consume_callback_data, forward_lock, handle_delta
     };
     use ekubo::components::util::{serialize};
     use ekubo::types::i129::{i129};
@@ -119,6 +119,9 @@ pub mod ISPRouter {
             );
 
             let recipient = get_contract_address();
+
+            // handle_delta(core, token_amount.token, -token_amount.amount, recipient);
+            // handle_delta(core, first.token, first.amount, recipient);
 
             // To take a negative delta out of core, do (assuming token0 for token1):
             core.withdraw(swap_data.route.pool_key.token1, recipient, isp_delta.amount1.mag.into());

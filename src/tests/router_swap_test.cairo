@@ -155,7 +155,7 @@ fn test_isp_router_swap() {
     // 0% 340282366920938463463374607431768211456 Success
     // 5% 357296485266985386636543337803356622028 'LIMIT_DIRECTION'
     // 20% 408338840305126156156049528918121853747 'LIMIT_DIRECTION' 
-    let sqrt_ratio_limit : u256 = 340282366920938463463374607431768211456;
+    let sqrt_ratio_limit : u256 = 323268248574891540290205877060179800883;
     println!("Sqrt price limit: {}", sqrt_ratio_limit);
 
     let route = RouteNode {
@@ -168,11 +168,21 @@ fn test_isp_router_swap() {
         token_amount,
     };
 
-    // Approve router to spend tokens
+    let balance_before = IERC20Dispatcher{ contract_address: pool_key.token0 }
+        .balanceOf(get_contract_address());
+
+    // Transfer tokens to router to spend
     IERC20Dispatcher{ contract_address: pool_key.token0 }
-        .approve(router.contract_address, amount_in.into());
+        .transfer(router.contract_address, amount_in.into());
 
     // Execute the swap
     router.swap(swap_data);
+
+    let balance_after = IERC20Dispatcher{ contract_address: pool_key.token0 }
+        .balanceOf(get_contract_address());
+
+    assert(
+        balance_after == balance_before - amount_in.into(), 'not correct token balance'
+    );
 
 }
