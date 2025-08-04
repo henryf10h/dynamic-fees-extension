@@ -214,12 +214,12 @@ impl InternalSwapPoolImpl of IISP<ContractState> {
         fn calc_fee(ref self: ContractState, amount: u128) -> u128 {
             if amount % 2 == 0 {
                 // Even: 0.5%
-                // amount * 5 / 1000
-                0
+            (amount * 5) / 1000
+                
             } else {
                 // Odd: 1%
-                // amount / 100
-                0
+                amount / 100
+                
             }
             }
 
