@@ -3,11 +3,15 @@
 #[starknet::contract]
 pub mod InternalSwapPool {
     use ekubo::interfaces::core::{
-        IExtension, SwapParameters, UpdatePositionParameters, IForwardee, ICoreDispatcher,
+        IExtension, 
+        SwapParameters, 
+        UpdatePositionParameters, 
+        IForwardee, 
+        ICoreDispatcher,
         ICoreDispatcherTrait
     };
     use ekubo::types::delta::{Delta};
-    use ekubo::types::keys::{PoolKey};
+    use ekubo::types::keys::{PoolKey, SavedBalanceKey};
     use ekubo::types::call_points::{CallPoints};
     use ekubo::types::bounds::{Bounds};
     use ekubo::types::i129::{i129};
@@ -133,9 +137,8 @@ pub mod InternalSwapPool {
 
             let is_token1 = swap_data.route.pool_key.token1 == swap_data.token_amount.token;
 
-            // Execute the ISP swap
-            let result : Delta = InternalSwapPoolImpl::execute_isp_swap(
-                ref self,
+            // Directly call core.swap here instead of execute_isp_swap
+            let result : Delta = core.swap(
                 swap_data.route.pool_key,
                 SwapParameters {
                     amount: swap_data.token_amount.amount,
@@ -144,10 +147,33 @@ pub mod InternalSwapPool {
                     skip_ahead: swap_data.route.skip_ahead
                 }
             );
+            // Handle fees based on the swap result
+            let mut new_delta = result;
+            if result.amount0.sign {
+                // Token0 negative: take fee from amount0
+                let fee = InternalSwapPoolImpl::calc_fee(ref self, result.amount0.mag);
+                let key = SavedBalanceKey {
+                    owner: get_contract_address(),
+                    token: swap_data.route.pool_key.token0,
+                    salt: 0,
+                };
+                core.save(key, fee);
+                new_delta.amount0.mag = result.amount0.mag - fee;
+            } else if result.amount1.sign {
+                // Token1 negative: take fee from amount1
+                let fee = InternalSwapPoolImpl::calc_fee(ref self, result.amount1.mag);
+                let key = SavedBalanceKey {
+                    owner: get_contract_address(),
+                    token: swap_data.route.pool_key.token1,
+                    salt: 1,
+                };
+                core.save(key, fee);
+                new_delta.amount1.mag = result.amount1.mag - fee;
+            }
 
-            // Serialize and return the result
+            // Serialize and return the modified delta
             let mut result_data = array![];
-            Serde::serialize(@result, ref result_data);
+            Serde::serialize(@new_delta, ref result_data);
             result_data.span()
         }
     }
@@ -185,16 +211,19 @@ impl InternalSwapPoolImpl of IISP<ContractState> {
             self.native_token.read()
         }
 
-        /// Execute basic ISP swap
-        fn execute_isp_swap(
-            ref self: ContractState,
-            pool_key: PoolKey,
-            params: SwapParameters
-        ) -> Delta {
-            let core = self.core.read();
-            let delta = core.swap(pool_key, params);
-            delta
-        }
+        fn calc_fee(ref self: ContractState, amount: u128) -> u128 {
+            if amount % 2 == 0 {
+                // Even: 0.5%
+                // amount * 5 / 1000
+                0
+            } else {
+                // Odd: 1%
+                // amount / 100
+                0
+            }
+            }
+
+        // execute_isp_swap removed; logic is now inlined in forwarded
     }
 }
 

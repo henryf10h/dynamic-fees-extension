@@ -2,7 +2,6 @@
 
 use starknet::ContractAddress;
 use ekubo::types::keys::{PoolKey};
-use ekubo::types::delta::{Delta};
 use ekubo::interfaces::core::{
     ICoreDispatcher, SwapParameters
 };
@@ -20,11 +19,6 @@ use ekubo::interfaces::core::{
             pool_key: PoolKey,
             params: SwapParameters
         ) -> bool;
-        fn execute_isp_swap(
-            ref self: TState,
-            pool_key: PoolKey,
-            params: SwapParameters
-        ) -> Delta;
         fn accumulate_fees(
             ref self: TState,
             pool_key: PoolKey,
@@ -32,4 +26,5 @@ use ekubo::interfaces::core::{
             amount: u128
         );
         fn get_native_token(self: @TState) -> ContractAddress;
+        fn calc_fee(ref self: TState, amount: u128) -> u128;
     }

@@ -6,21 +6,29 @@ pub mod ISPRouter {
     use ekubo::components::clear::{ClearImpl};
     use ekubo::components::owned::{Owned as owned_component};
     use ekubo::components::shared_locker::{
-        call_core_with_callback, consume_callback_data, forward_lock, handle_delta
+        call_core_with_callback, 
+        consume_callback_data, 
+        forward_lock, 
+        handle_delta
     };
     use ekubo::components::util::{serialize};
     use ekubo::types::i129::{i129};
     use ekubo::types::delta::{Delta};
+    use ekubo::types::keys::{PoolKey};
+    use ekubo::types::call_points::{CallPoints};
     use ekubo::interfaces::core::{
-        ICoreDispatcher, ICoreDispatcherTrait, SwapParameters, IForwardeeDispatcher, ILocker
+        ICoreDispatcher, 
+        ICoreDispatcherTrait, 
+        SwapParameters, 
+        IForwardeeDispatcher, 
+        ILocker
     };
     use ekubo::interfaces::mathlib::{IMathLibDispatcherTrait, dispatcher as mathlib};
     use ekubo::interfaces::erc20::{IERC20Dispatcher, IERC20DispatcherTrait};
-    use ekubo::types::keys::{PoolKey};
     use starknet::{get_contract_address, get_caller_address, ContractAddress};
     use starknet::storage::{StoragePointerWriteAccess, StoragePointerReadAccess};
     use relaunch::interfaces::Irouter::{IISPRouter};
-    use relaunch::interfaces::Irouter::{Swap};
+    use relaunch::interfaces::Irouter::{Swap, RouteNode, TokenAmount};
 
     #[abi(embed_v0)]
     impl Clear = ekubo::components::clear::ClearImpl<ContractState>;
@@ -81,12 +89,42 @@ pub mod ISPRouter {
 
     #[abi(embed_v0)]
     impl ISPRouterImpl of IISPRouter<ContractState> {
+
         /// Main swap function - uses lock-forward pattern for ISP
         fn swap( ref self: ContractState, swap_data: Swap) -> Delta {
             // Use the helper to call core.lock with our callback
             call_core_with_callback( self.core.read(), @swap_data )
         }
-        
+    }
+
+    // Locker implementation - this is where the core logic happens
+    #[abi(embed_v0)]
+    impl LockerImpl of ILocker<ContractState> {
+        fn locked(ref self: ContractState, id: u32, data: Span<felt252>) -> Span<felt252> {
+            let core = self.core.read();
+
+            // Consume the callback data
+            let swap_data : Swap = consume_callback_data(core, data);
+
+            // Forward to InternalSwapPool extension and get result
+            let isp_delta: Delta = forward_lock(
+                core,
+                IForwardeeDispatcher { contract_address: swap_data.route.pool_key.extension },
+                @swap_data
+            );
+
+            let recipient = get_contract_address();
+
+            // Handle deltas - no sign manipulation needed!
+            // The delta represents the pool's perspective:
+            // - Positive delta = pool owes tokens (router receives)
+            // - Negative delta = router owes tokens to pool (router pays)
+            handle_delta(core, swap_data.route.pool_key.token0, isp_delta.amount0, recipient);
+            handle_delta(core, swap_data.route.pool_key.token1, isp_delta.amount1, recipient);
+
+            // Return the result using serialize helper
+            serialize(@isp_delta).span()
+        }
     }
 
     #[generate_trait]
@@ -99,39 +137,6 @@ pub mod ISPRouter {
             // Must match the salt generation in ISP component
             let user_felt: felt252 = user.into();
             user_felt + 'user_withdrawal'
-        }
-    }
-
-    // Locker implementation - this is where the core logic happens
-    #[abi(embed_v0)]
-    impl LockerImpl of ILocker<ContractState> {
-        fn locked(ref self: ContractState, id: u32, data: Span<felt252>) -> Span<felt252> {
-            let core = self.core.read();
-            
-            // Consume the callback data
-            let swap_data : Swap = consume_callback_data(core, data);
-            
-            // Forward to InternalSwapPool extension and get result
-            let isp_delta: Delta = forward_lock(
-                core,
-                IForwardeeDispatcher { contract_address: swap_data.route.pool_key.extension },
-                @swap_data
-            );
-
-            let recipient = get_contract_address();
-
-            // handle_delta(core, token_amount.token, -token_amount.amount, recipient);
-            // handle_delta(core, first.token, first.amount, recipient);
-
-            // To take a negative delta out of core, do (assuming token0 for token1):
-            core.withdraw(swap_data.route.pool_key.token1, recipient, isp_delta.amount1.mag.into());
-            // To pay tokens you owe, do (assuming payment is for token0):
-            let token = IERC20Dispatcher { contract_address: swap_data.route.pool_key.token0 };
-            token.approve(core.contract_address, isp_delta.amount0.mag.into());
-            core.pay(token.contract_address);
-            
-            // Return the result using serialize helper
-            serialize(@isp_delta).span()
         }
     }
 }
