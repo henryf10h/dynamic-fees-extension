@@ -135,6 +135,7 @@ pub mod InternalSwapPool {
             // Consume the callback data from router
             let swap_data : Swap = consume_callback_data(core, data);
 
+            // Determine if it is token1
             let is_token1 = swap_data.route.pool_key.token1 == swap_data.token_amount.token;
 
             // Directly call core.swap here instead of execute_isp_swap
@@ -147,13 +148,16 @@ pub mod InternalSwapPool {
                     skip_ahead: swap_data.route.skip_ahead
                 }
             );
+
             // Handle fees based on the swap result
             let mut new_delta = result;
             if result.amount0.sign {
                 // Token0 negative: take fee from amount0
                 let fee = InternalSwapPoolImpl::calc_fee(ref self, result.amount0.mag);
+                // Credit fee to internal swap pool owner
+                let owner = self.owned.get_owner();
                 let key = SavedBalanceKey {
-                    owner: get_contract_address(),
+                    owner,
                     token: swap_data.route.pool_key.token0,
                     salt: 0,
                 };
@@ -162,12 +166,25 @@ pub mod InternalSwapPool {
             } else if result.amount1.sign {
                 // Token1 negative: take fee from amount1
                 let fee = InternalSwapPoolImpl::calc_fee(ref self, result.amount1.mag);
+                // Save fee for amount1
                 let key = SavedBalanceKey {
                     owner: get_contract_address(),
                     token: swap_data.route.pool_key.token1,
                     salt: 1,
                 };
                 core.save(key, fee);
+                // Load the saved balance
+                core.load(
+                    key.token,
+                    key.salt,
+                    fee
+                );
+                // Accumulate as protocol fees using ekubo core
+                core.accumulate_as_fees(
+                    swap_data.route.pool_key,
+                    0,
+                    fee
+                );
                 new_delta.amount1.mag = result.amount1.mag - fee;
             }
 
@@ -221,7 +238,7 @@ impl InternalSwapPoolImpl of IISP<ContractState> {
                 amount / 100
                 
             }
-            }
+        }
 
         // execute_isp_swap removed; logic is now inlined in forwarded
     }
