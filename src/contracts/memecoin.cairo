@@ -12,7 +12,6 @@ mod Memecoin {
     use openzeppelin::utils::cryptography::snip12::SNIP12Metadata;
     use starknet::{ContractAddress, get_caller_address, event};
     use core::num::traits::{Zero};
-    // use core::zeroable;
     use core::traits::Into;
     use relaunch::interfaces::Imemecoin::IMeme;
 

@@ -252,7 +252,7 @@ fn test_isp_swap_token1_for_token0_odd_fee() {
         .transfer(router.contract_address, amount_in.into());
 
     // Print balances before swap
-        let balance_core1 = IERC20Dispatcher{ contract_address: pool_key.token1 }
+    let balance_core1 = IERC20Dispatcher{ contract_address: pool_key.token1 }
         .balanceOf(ekubo_core().contract_address);
 
     println!("Core balance token1 before swap: {}", balance_core1);
